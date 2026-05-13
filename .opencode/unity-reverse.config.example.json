@@ -1,0 +1,128 @@
+{
+  "// Description": "Unity Reverse Engineering Configuration Example",
+  "// Copy this file to unity-reverse.config.json and customize",
+  
+  "workflow": {
+    "enableIdaAnalysis": true,
+    "enableIdaRpc": true,
+    "enableAssetRipper": true,
+    "buildUnityProject": true,
+    "batchSize": 50,
+    "maxRetries": 3,
+    "checkpointInterval": 100,
+    "parallelValidation": false
+  },
+  
+  "unity": {
+    "defaultVersion": "2021.3.0f1",
+    "editorPath": "/Applications/Unity/Hub/Editor",
+    "fallbackDllPaths": [
+      "/Applications/Unity/Hub/Editor/2021.3.1f1/Unity.app/Contents/Managed/UnityEngine",
+      "/Applications/Unity/Hub/Editor/2022.3.1f1/Unity.app/Contents/Managed/UnityEngine"
+    ],
+    "project": {
+      "buildComplete": true,
+      "createAsmdef": true,
+      "includeReadme": true,
+      "fixReferences": true,
+      "generateMetaFiles": true,
+      "rebuildScenes": true,
+      "createDefaultScene": true
+    }
+  },
+  
+  "ida": {
+    "autoDetect": true,
+    "paths": [
+      "/Applications/IDA Pro 8.3/ida64.app/Contents/MacOS/ida64",
+      "/Applications/IDA Pro 8.4/ida64.app/Contents/MacOS/ida64",
+      "/usr/local/bin/ida64"
+    ],
+    "timeout": 1800,
+    "analysisDepth": "deep",
+    "rpc": {
+      "enabled": true,
+      "url": "http://localhost:7734",
+      "timeout": 30000,
+      "retryAttempts": 3,
+      "batchSize": 100
+    }
+  },
+  
+  "assetRipper": {
+    "enabled": true,
+    "autoDetectPath": true,
+    "paths": [
+      "~/UnPackTools/AssetRipper/AssetRipper.GUI.Free",
+      "~/UnPackAPP/UnPackTools/AssetRipper/AssetRipper.GUI.Free",
+      "/usr/local/bin/AssetRipper"
+    ],
+    "exportFormats": {
+      "textures": "png",
+      "models": "fbx",
+      "audio": "wav",
+      "scripts": "skip"
+    },
+    "extractAssets": ["textures", "models", "audio", "scenes", "prefabs", "materials"],
+    "timeout": 600
+  },
+  
+  "llm": {
+    "model": "anthropic/claude-3.5-sonnet",
+    "temperature": 0.3,
+    "maxTokens": 8000,
+    "retryDelay": 1000,
+    "rateLimit": {
+      "requestsPerMinute": 50,
+      "tokensPerMinute": 80000
+    }
+  },
+  
+  "filtering": {
+    "includeNamespaces": [
+      "// Add custom namespaces to force-include",
+      "// Example: \"MyGame.Custom\""
+    ],
+    "excludeNamespaces": [
+      "// Add custom namespaces to force-exclude",
+      "// Example: \"SomeSDK\""
+    ],
+    "thirdPartyLibraries": [
+      "Photon",
+      "PlayFab",
+      "Firebase",
+      "Facebook",
+      "Google",
+      "DOTween",
+      "ES3"
+    ]
+  },
+  
+  "validation": {
+    "enableRoslyn": true,
+    "strictMode": false,
+    "ignoreWarnings": true,
+    "customReferences": [
+      "// Add paths to additional DLLs if needed"
+    ]
+  },
+  
+  "output": {
+    "preserveNamespaces": true,
+    "generateComments": true,
+    "includeSourceInfo": true,
+    "formatting": {
+      "indentation": "spaces",
+      "indentSize": 4,
+      "newlineStyle": "lf"
+    }
+  },
+  
+  "advanced": {
+    "memoryLimit": 4096,
+    "timeoutPerClass": 120,
+    "debugMode": false,
+    "verboseLogging": false,
+    "preserveTempFiles": false
+  }
+}
