@@ -10,14 +10,17 @@ Load the `unity-implement-from-dump` skill and execute the workflow to reconstru
 ## Usage
 
 ```bash
-/impl-unity [--class ClassName] [--progress] [--rebuild-cache]
+/impl-unity [--class ClassName] [--progress] [--rebuild-cache] [--analyze ModulePath] [--analyze-all] [-help]
 ```
 
 ## Parameters
 
-- `--class ClassName`: Implement a specific class (optional, otherwise implements all pending classes)
-- `--progress`: Show implementation progress statistics
-- `--rebuild-cache`: Force rebuild of dump cache (fixes parsing issues)
+- `--class ClassName`: 实现指定的 C# 类（若不指定则自动处理下一个）。
+- `--progress`: 查看整体工程和各模块的实现进度统计。
+- `--rebuild-cache`: 强制重新解析 dump.cs 并更新缓存（在 dump 文件变动后使用）。
+- `--analyze ModulePath`: 深度分析指定模块的职责（例如 Gameplay/Arrow），产出分析报告至 `implExport/`。
+- `--analyze-all`: 批量分析工程内所有模块，产出全量分析报告至 `implExport/`。
+- `-help`: 显示此帮助信息，列出所有可用命令及其说明。
 
 ## What It Does
 
@@ -38,17 +41,20 @@ Load the `unity-implement-from-dump` skill and execute the workflow to reconstru
 ## Example
 
 ```bash
-# Show progress
+# 显示帮助信息
+/impl-unity -help
+
+# 查看进度
 /impl-unity --progress
 
-# Implement all pending classes
-/impl-unity
-
-# Implement specific class
+# 实现特定类
 /impl-unity --class ArrowController
 
-# Rebuild cache after dump.cs changes
-/impl-unity --rebuild-cache
+# 分析模块职责
+/impl-unity --analyze Gameplay/Arrow
+
+# 分析所有模块
+/impl-unity --analyze-all
 ```
 
 ## Configuration
@@ -73,6 +79,6 @@ Project-specific filters in `.opencode/filter.json`:
 ## Output
 
 - Implemented classes: `<project>/Assets/Scripts/`
-- Research notes: `<project>/.opencode/reverse_research/<ClassName>.md`
+- Research notes (MD docs): `<project>/implExport/<ClassName>.md`
 - Progress tracking: `<project>/.opencode/unity-implement-progress.json`
 - Cache: `<project>/.opencode/dump_cache.json`

@@ -1636,7 +1636,12 @@ export const layer = Layer.effect(
           providerID: model.providerID,
         })
         const provider = s.providers[model.providerID]
-        const options = { ...provider.options }
+        const options: Record<string, any> = {
+          // Default timeouts to prevent indefinite hangs
+          timeout: 300000, // 5 minutes - matches documented default
+          chunkTimeout: 30000, // 30 seconds between SSE chunks
+          ...provider.options, // User config overrides defaults
+        }
 
         if (
           model.providerID === "google-vertex" &&
@@ -1714,7 +1719,8 @@ export const layer = Layer.effect(
           if (opts.signal) signals.push(opts.signal)
           if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
           if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
-          if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
+          // Apply timeout unless explicitly disabled with false
+          if (options["timeout"] !== false && typeof options["timeout"] === "number" && options["timeout"] > 0)
             signals.push(AbortSignal.timeout(options["timeout"]))
 
           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
