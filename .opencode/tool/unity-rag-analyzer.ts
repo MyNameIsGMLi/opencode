@@ -31,13 +31,9 @@ export default tool({
     await fs.mkdir(analysisDir, { recursive: true })
 
     const indexPath = path.join(ragDir, "index.json")
-    let index: RAGIndex
-    try {
-      const content = await fs.readFile(indexPath, "utf-8")
-      index = JSON.parse(content)
-    } catch {
-      return { error: `RAG 索引不存在: ${indexPath}。请先运行 unity-rag-core index 操作。` }
-    }
+    const exists = await fs.access(indexPath).then(() => true).catch(() => false)
+    if (!exists) return { error: `RAG 索引不存在，请先运行: /impl-unity --init` }
+    const index: RAGIndex = await Bun.file(indexPath).json()
 
     if (args.mode === "full") {
       return runFullAnalysis(index, analysisDir, args.verbose ?? false)
@@ -186,7 +182,6 @@ async function runIncrementalAnalysis(
 
 function buildClassDiagram(classes: KnowledgeChunk[], verifiedChunks: KnowledgeChunk[]): string {
   const verifiedNames = new Set(verifiedChunks.map((c) => c.metadata.className).filter(Boolean))
-  const now = new Date().toISOString()
 
   const lines: string[] = ["classDiagram"]
 
@@ -211,7 +206,7 @@ function buildClassDiagram(classes: KnowledgeChunk[], verifiedChunks: KnowledgeC
     }
   }
 
-  return `# 类图\n\n\`\`\`mermaid\n${lines.join("\n")}\n\`\`\`\n\n> 更新时间: ${now}\n`
+  return `# 类图\n\n\`\`\`mermaid\n${lines.join("\n")}\n\`\`\`\n\n> 更新时间: ${new Date().toISOString()}\n`
 }
 
 // ==================== buildArchDiagram ====================
@@ -220,8 +215,6 @@ function buildArchDiagram(
   modules: Map<string, KnowledgeChunk[]>,
   classChunks: KnowledgeChunk[],
 ): string {
-  const now = new Date().toISOString()
-
   // className → moduleName lookup
   const classToModule = new Map<string, string>()
   for (const c of classChunks) {
@@ -253,13 +246,12 @@ function buildArchDiagram(
     }
   }
 
-  return `# 架构图\n\n\`\`\`mermaid\n${lines.join("\n")}\n\`\`\`\n\n> 更新时间: ${now}\n`
+  return `# 架构图\n\n\`\`\`mermaid\n${lines.join("\n")}\n\`\`\`\n\n> 更新时间: ${new Date().toISOString()}\n`
 }
 
 // ==================== buildGameplayDoc ====================
 
 function buildGameplayDoc(classChunks: KnowledgeChunk[], verifiedChunks: KnowledgeChunk[]): string {
-  const now = new Date().toISOString()
   const verifiedNames = new Set(verifiedChunks.map((c) => c.metadata.className).filter(Boolean))
 
   // Identify core gameplay classes
@@ -284,15 +276,8 @@ function buildGameplayDoc(classChunks: KnowledgeChunk[], verifiedChunks: Knowled
   // Assign each core class to first matching group (last group is catch-all)
   for (const c of coreClasses) {
     const name = c.metadata.className ?? ""
-    let assigned = false
-    for (let i = 0; i < groups.length - 1; i++) {
-      if (groups[i].pattern.test(name)) {
-        groups[i].classes.push(c)
-        assigned = true
-        break
-      }
-    }
-    if (!assigned) groups[groups.length - 1].classes.push(c)
+    const matchIndex = groups.slice(0, -1).findIndex((g) => g.pattern.test(name))
+    groups[matchIndex === -1 ? groups.length - 1 : matchIndex].classes.push(c)
   }
 
   const sections: string[] = []
@@ -300,7 +285,7 @@ function buildGameplayDoc(classChunks: KnowledgeChunk[], verifiedChunks: Knowled
   const header = `# 核心玩法方案
 
 > 自动分析自 IL2CPP dump.cs，共识别 ${coreClasses.length} 个核心玩法类
-> 更新时间: ${now}
+> 更新时间: ${new Date().toISOString()}
 
 ---`
   sections.push(header)
