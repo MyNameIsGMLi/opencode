@@ -312,6 +312,17 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
     }
   }
 
+  // 自动增量分析（更新图表和玩法文档）
+  try {
+    await ctx.tool("unity-rag-analyzer", {
+      projectDir,
+      mode: "incremental",
+      className,
+    })
+  } catch {
+    // 分析失败不影响主流程
+  }
+
   // Step 3: 返回优化的 Prompt
   const outputPath = path.join(projectDir, "Assets/Scripts", `${className}.cs`)
 
