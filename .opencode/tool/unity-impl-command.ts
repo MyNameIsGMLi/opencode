@@ -28,6 +28,7 @@ export default tool({
     rebuildCache: tool.schema.boolean().optional().describe("强制重建索引"),
     verbose: tool.schema.boolean().optional().describe("显示详细日志"),
     help: tool.schema.boolean().optional().describe("显示帮助"),
+    analyze: tool.schema.boolean().optional().describe("全量分析：生成所有图表和玩法文档"),
     
     // 自动检测项目目录
     projectDir: tool.schema.string().optional().describe("项目目录（自动检测）"),
@@ -87,6 +88,11 @@ export default tool({
     // ==================== 处理 --smart-ida ====================
     if (args.smartIda) {
       return await handleSmartIda(args, ctx, projectDir)
+    }
+
+    // ==================== 处理 --analyze ====================
+    if (args.analyze) {
+      return await handleAnalyze(args, ctx, projectDir)
     }
 
     // ==================== 处理 --class ====================
@@ -347,5 +353,30 @@ ${retrieveResult.prompt}
     prompt: retrieveResult.prompt,
     context: retrieveResult.context,
     outputPath,
+  }
+}
+
+// ==================== 处理 --analyze ====================
+
+async function handleAnalyze(args: any, ctx: any, projectDir: string) {
+  console.log("🔍 正在全量分析，生成 UML/架构图/核心玩法方案...")
+
+  const result = await ctx.tool("unity-rag-analyzer", {
+    projectDir,
+    mode: "full",
+    verbose: args.verbose,
+  })
+
+  if (result.error) return result
+
+  return {
+    output: `${result.output}
+
+📁 分析文档目录: .opencode/docs/analysis/
+  - architecture.md        全局架构图（模块依赖）
+  - *-class-diagram.md     各模块类图
+  - gameplay-design.md     核心玩法方案（时序图/状态机/类清单）
+
+💡 提示: 每次 /impl-unity --class 实现后会自动增量更新这些文档。`,
   }
 }

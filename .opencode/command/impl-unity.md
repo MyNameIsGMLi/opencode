@@ -40,7 +40,7 @@ await tool("unity-impl-command", {
 ## Usage
 
 ```bash
-/impl-unity [--class ClassName] [--init] [--progress] [--smart-ida] [--help]
+/impl-unity [--class ClassName] [--init] [--progress] [--smart-ida] [--analyze] [--help]
 ```
 
 ## Parameters
@@ -51,6 +51,7 @@ await tool("unity-impl-command", {
 - `--init`: 初始化 RAG 知识库（首次使用必须）
 - `--progress`: 查看实现进度和知识库统计
 - `--smart-ida`: 智能批量获取 IDA 分析（只对复杂类）
+- `--analyze`: 全量分析：生成所有 UML/架构图/流程图和核心玩法方案文档（持续更新）
 - `--help`: 显示此帮助信息
 
 ### 高级参数
@@ -173,6 +174,22 @@ await tool("unity-impl-command", {
 
 # Step 4: 查看进度
 /impl-unity --progress
+```
+
+### 场景 3: 分析游戏架构
+
+```bash
+# 初始化后全量分析
+/impl-unity --init
+/impl-unity --analyze
+
+# 生成的文档位置:
+# .opencode/docs/analysis/architecture.md        → 全局模块依赖架构图
+# .opencode/docs/analysis/gameplay-design.md     → 核心玩法方案（时序图/状态机/类清单）
+# .opencode/docs/analysis/*-class-diagram.md    → 各模块类图
+
+# 后续每次实现类，文档自动增量更新
+/impl-unity --class PlayerController
 ```
 
 ## 性能对比
