@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
+import { loadProjectConfig, resolveScriptJsonPath } from "./unity-project-config"
 
 /**
  * Unity RAG IDA 集成
@@ -148,6 +149,17 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 
     // ==================== 批量获取 IDA 分析 ====================
 
+    // 读取 script.json（在循环外，只读一次）
+    const config = await loadProjectConfig(args.projectDir)
+    const scriptJsonPath = resolveScriptJsonPath(args.projectDir, config)
+    let scriptJson: any
+    try {
+      const scriptContent = await Bun.file(scriptJsonPath).text()
+      scriptJson = JSON.parse(scriptContent)
+    } catch {
+      return { error: "无法读取 script.json" }
+    }
+
     const results: Array<{ className: string; success: boolean; error?: string }> = []
     let successCount = 0
     let failCount = 0
@@ -165,16 +177,6 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
           results.push({ className, success: false, error: "类不存在" })
           failCount++
           continue
-        }
-
-        // 获取方法地址（从 script.json）
-        const scriptJsonPath = path.join(args.projectDir, "Assets/Il2CppDump/script.json")
-        let scriptJson: any
-        try {
-          const scriptContent = await fs.readFile(scriptJsonPath, "utf-8")
-          scriptJson = JSON.parse(scriptContent)
-        } catch {
-          return { error: "无法读取 script.json" }
         }
 
         const methods = scriptJson.ScriptMethod || []

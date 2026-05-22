@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
 import * as fs from "fs/promises"
+import { loadProjectConfig, resolveDumpCsPath, resolveScriptJsonPath, resolveScriptsDir, detectProjectDir as detectProjectDirFromConfig } from "./unity-project-config"
 
 /**
  * Unity impl-unity 命令处理器
@@ -32,6 +33,8 @@ export default tool({
     
     // 自动检测项目目录
     projectDir: tool.schema.string().optional().describe("项目目录（自动检测）"),
+    dumpDir: tool.schema.string().optional().describe("dump.cs 所在目录（覆盖默认 Assets/Il2CppDump）"),
+    scriptDir: tool.schema.string().optional().describe("C# 脚本输出目录（覆盖默认 Assets/Scripts）"),
   },
 
   async execute(args, ctx) {
@@ -162,29 +165,7 @@ async function showHelp(): Promise<string> {
 // ==================== 检测项目目录 ====================
 
 async function detectProjectDir(ctx: any): Promise<string | null> {
-  // 尝试当前目录
-  const cwd = process.cwd()
-  
-  const candidates = [
-    cwd,
-    path.join(cwd, ".."),
-    path.join(cwd, "../.."),
-  ]
-
-  for (const dir of candidates) {
-    const dumpPath = path.join(dir, "Assets/Il2CppDump/dump.cs")
-    const scriptPath = path.join(dir, "Assets/Il2CppDump/script.json")
-
-    try {
-      await fs.access(dumpPath)
-      await fs.access(scriptPath)
-      return dir
-    } catch {
-      continue
-    }
-  }
-
-  return null
+  return detectProjectDirFromConfig(process.cwd())
 }
 
 // ==================== 检查 RAG 是否已初始化 ====================
@@ -205,10 +186,17 @@ async function checkRagInitialized(projectDir: string): Promise<boolean> {
 async function handleInit(args: any, ctx: any, projectDir: string) {
   console.log("🚀 正在初始化 RAG 知识库...")
 
+  const config = await loadProjectConfig(projectDir)
   const result = await ctx.tool("unity-rag-workflow", {
     workflow: "init",
     projectDir,
     verbose: args.verbose,
+    ...(args.dumpDir
+      ? {
+          dumpCsPath: path.join(args.dumpDir, "dump.cs"),
+          scriptJsonPath: path.join(args.dumpDir, "script.json"),
+        }
+      : {}),
   })
 
   if (result.error) {
@@ -330,7 +318,9 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
   }
 
   // Step 3: 返回优化的 Prompt
-  const outputPath = path.join(projectDir, "Assets/Scripts", `${className}.cs`)
+  const config = await loadProjectConfig(projectDir)
+  const scriptsDir = resolveScriptsDir(projectDir, config, args.scriptDir)
+  const outputPath = path.join(scriptsDir, `${className}.cs`)
 
   return {
     output: `${retrieveResult.output}
