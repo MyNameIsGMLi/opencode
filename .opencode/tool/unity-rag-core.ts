@@ -255,6 +255,18 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
   const xrefsPath = path.join(ragDir, "xrefs.json")
   await fs.writeFile(xrefsPath, JSON.stringify(xrefs, null, 2), "utf-8")
 
+  // ── 尝试运行社区检测（可选，需要 Python 3 + networkx）─────────────
+  const commPath = path.join(ragDir, "communities.json")
+  const detectScript = path.join(args.projectDir, ".opencode", "scripts", "detect_communities.py")
+  const scriptExists = await fs.access(detectScript).then(() => true).catch(() => false)
+  if (scriptExists) {
+    try {
+      await ctx.bash(`python3 "${detectScript}" "${xrefsPath}" "${commPath}" 2>/dev/null`)
+    } catch {
+      // 社区检测失败不影响主流程，静默处理
+    }
+  }
+
   return {
     output: `✅ 静态知识索引完成！
 
@@ -732,4 +744,58 @@ function detectModules(classes: ClassInfo[]): Map<string, ClassInfo[]> {
   }
 
   return modules
+}
+
+// ==================== 共享辅助：判断是否需要 IDA（导出供其他工具使用）====================
+
+/**
+ * 判断某个类是否需要 IDA 分析
+ * 统一规则，供 unity-rag-ida 和 unity-rag-retriever 共用
+ */
+export function judgeNeedsIDA(classChunk: any, allVerified: any[] = []): boolean {
+  const name = classChunk.metadata?.className || ""
+  const fullName = classChunk.metadata?.fullName || ""
+  const complexity = classChunk.metadata?.complexity || 0
+  const methodCount = classChunk.metadata?.methodCount || 0
+
+  const keywords = [
+    /Encrypt/i, /Decrypt/i, /Hash/i, /Compress/i,
+    /Network/i, /Protocol/i, /Serialize/i,
+    /Calculate.*Damage/i, /AI/i, /Pathfind/i, /Sync/i,
+  ]
+  if (keywords.some(k => k.test(name) || k.test(fullName))) return true
+  if (complexity > 80) return true
+  if (methodCount > 20) return true
+  // 规则4：同命名空间相似类已使用 IDA
+  const ns = classChunk.metadata?.namespace
+  return allVerified.some((v: any) => v.metadata?.namespace === ns && v.metadata?.usedIDA === true)
+}
+
+/**
+ * 为 IDA 分析选择最重要的方法（按优先级排序）
+ * - Priority 1: Unity 生命周期方法（Update/FixedUpdate等）
+ * - Priority 2: 业务逻辑关键词（Calculate/Process/Execute等）
+ * - Priority 3: 参数最多的方法（最复杂）
+ * 返回所有 score > 0 的方法，上限 10 个
+ */
+export function selectMethodsForIDA(classMethods: any[]): any[] {
+  const scored = classMethods.map(m => {
+    // 从 "Namespace.ClassName::MethodName(params)" 提取方法名
+    const shortName = (m.Name || "").split("::").pop()?.split("(")[0] || ""
+    let score = 0
+    if (/^(Update|FixedUpdate|LateUpdate|Awake|Start|OnEnable|OnDisable|OnDestroy|OnTrigger|OnCollision)$/.test(shortName))
+      score += 100
+    if (/Calculate|Process|Execute|Apply|Handle|Compute|Perform|Resolve|Init|Generate|Build/i.test(shortName))
+      score += 50
+    // 参数数量（粗略估算：通过逗号计数）
+    const paramStr = (m.Name || "").split("(")[1] ?? ""
+    const paramCount = paramStr.length > 2 ? (paramStr.split(",").length) : 0
+    score += paramCount * 5
+    return { method: m, score }
+  })
+  return scored
+    .filter(s => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
+    .map(s => s.method)
 }
