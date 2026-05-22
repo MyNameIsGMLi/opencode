@@ -1,6 +1,8 @@
 import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
+import { isV2, migrateV1toV2 } from "./unity-rag-cache"
+import { loadProjectConfig, resolveScriptsDir } from "./unity-project-config"
 
 /**
  * Unity RAG 完整工作流
@@ -192,7 +194,9 @@ async function implementWorkflow(args: any, ctx: any, ragDir: string) {
   // Step 3: 返回优化的 Prompt
   log("[3/4] 生成 AI Prompt...")
 
-  const outputPath = path.join(args.projectDir, "Assets/Scripts", `${args.className}.cs`)
+  const config = await loadProjectConfig(args.projectDir)
+  const scriptsDir = resolveScriptsDir(args.projectDir, config)
+  const outputPath = path.join(scriptsDir, `${args.className}.cs`)
 
   return {
     output: `✅ RAG 检索完成: ${args.className}
@@ -233,13 +237,13 @@ async function batchWorkflow(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
   let index: any
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "RAG 索引不存在，请先运行 init 工作流" }
   }
 
-  const moduleChunk = index.chunks.find((c: any) => c.type === "module" && c.metadata.moduleName === args.moduleName)
+  const moduleChunk = index.hotChunks.modules.find((c: any) => c.metadata.moduleName === args.moduleName)
 
   if (!moduleChunk) {
     return { error: `未找到模块: ${args.moduleName}` }
@@ -328,16 +332,16 @@ async function statusWorkflow(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
   let index: any
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "RAG 索引不存在" }
   }
 
-  // 计算进度
-  const totalClasses = index.stats.totalClasses
-  const verifiedClasses = index.stats.verifiedImplementations
-  const progress = ((verifiedClasses / totalClasses) * 100).toFixed(1)
+  // 计算进度（防除零）
+  const totalClasses = index.stats?.totalClasses ?? 0
+  const verifiedClasses = index.stats?.verifiedImplementations ?? 0
+  const progress = totalClasses === 0 ? "0.0" : ((verifiedClasses / totalClasses) * 100).toFixed(1)
 
   // 估算剩余时间
   const remainingClasses = totalClasses - verifiedClasses
@@ -354,7 +358,7 @@ async function statusWorkflow(args: any, ctx: any, ragDir: string) {
 
 💡 建议:
 ${
-  index.stats.idaAnalyzed < totalClasses * 0.1
+  (index.stats?.idaAnalyzed ?? 0) < totalClasses * 0.1
     ? "- 考虑运行 smart-ida 工作流获取关键类的 IDA 分析"
     : "- IDA 覆盖率良好"
 }
