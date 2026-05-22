@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin"
-import * as fs from "fs/promises"
 import * as path from "path"
+import { isV2, migrateV1toV2 } from "./unity-rag-cache"
 
 /**
  * Unity RAG 学习工具
@@ -38,8 +38,8 @@ export default tool({
     // 加载 RAG 索引
     let index: any
     try {
-      const content = await fs.readFile(indexPath, "utf-8")
-      index = JSON.parse(content)
+      const raw = JSON.parse(await Bun.file(indexPath).text())
+      index = isV2(raw) ? raw : migrateV1toV2(raw)
     } catch {
       return {
         error: "RAG 索引不存在，请先运行: unity-rag-core --action=index",
@@ -49,7 +49,7 @@ export default tool({
     // 读取代码
     let code: string
     try {
-      code = await fs.readFile(args.codePath, "utf-8")
+      code = await Bun.file(args.codePath).text()
     } catch (error) {
       return {
         error: `无法读取代码文件: ${args.codePath}`,
@@ -82,7 +82,7 @@ export default tool({
     // 提取模式
     let patterns: Array<{ name: string; evidence: string }> = []
     if (args.extractPatterns !== false) {
-      patterns = extractPatterns(code, args.className)
+      patterns = extractPatterns(code)
     }
 
     // 创建 verified chunk
@@ -100,18 +100,18 @@ export default tool({
       },
     }
 
-    // 更新索引
-    const existingIndex = index.chunks.findIndex((c: any) => c.id === verifiedChunk.id)
-    if (existingIndex >= 0) {
-      index.chunks[existingIndex] = verifiedChunk
+    // 更新热数据 hotChunks.verified（v2 格式）
+    const existingIdx = index.hotChunks.verified.findIndex((c: any) => c.id === verifiedChunk.id)
+    if (existingIdx >= 0) {
+      index.hotChunks.verified[existingIdx] = verifiedChunk
     } else {
-      index.chunks.push(verifiedChunk)
-      index.stats.verifiedImplementations++
+      index.hotChunks.verified.push(verifiedChunk)
     }
+    index.stats.verifiedImplementations = index.hotChunks.verified.length
 
     // 保存
     index.updatedAt = new Date().toISOString()
-    await fs.writeFile(indexPath, JSON.stringify(index, null, 2), "utf-8")
+    await Bun.write(indexPath, JSON.stringify(index, null, 2))
 
     return {
       output: `✅ 已加入知识库: ${args.className}
@@ -168,7 +168,7 @@ function extractMetadata(code: string, className: string): any {
 
 // ==================== 模式提取 ====================
 
-function extractPatterns(code: string, className: string): Array<{ name: string; evidence: string }> {
+function extractPatterns(code: string): Array<{ name: string; evidence: string }> {
   const patterns: Array<{ name: string; evidence: string }> = []
 
   // 单例模式
