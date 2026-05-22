@@ -1,14 +1,18 @@
 import { tool } from "@opencode-ai/plugin"
-import * as fs from "fs/promises"
 import * as path from "path"
+import { migrateV1toV2, isV2, decompressChunk } from "./unity-rag-cache"
+import {
+  getUsedBy, getPriorityLabel, detectPatternsFromXrefs, type XrefsIndex,
+} from "./unity-rag-xrefs"
 
 /**
  * Unity RAG 智能检索器
- * 
+ *
  * 功能：
  * 1. 多层次混合检索（结构化 + 语义）
  * 2. 智能判断是否需要 IDA
- * 3. 生成优化的 AI Prompt
+ * 3. 融合 Xrefs 数据（使用示例 + 优先级 + 额外模式检测）
+ * 4. 生成优化的 AI Prompt
  */
 
 export default tool({
@@ -19,7 +23,7 @@ export default tool({
 - 基类和接口实现
 - 相似的已验证代码
 - IDA 伪代码（按需）
-- 使用示例和模式`,
+- Xrefs 使用示例和优先级（增强 AI Context）`,
 
   args: {
     projectDir: tool.schema.string().describe("Unity 项目根目录"),
@@ -32,15 +36,21 @@ export default tool({
     const ragDir = path.join(args.projectDir, ".opencode", "rag")
     const indexPath = path.join(ragDir, "index.json")
 
-    // 加载索引
+    // ── 加载索引（v1/v2 自动识别）────────────────────────────────────
     let index: any
     try {
-      const content = await fs.readFile(indexPath, "utf-8")
-      index = JSON.parse(content)
+      const raw = JSON.parse(await Bun.file(indexPath).text())
+      index = isV2(raw) ? raw : migrateV1toV2(raw)
     } catch {
-      return {
-        error: "RAG 索引不存在，请先运行: unity-rag-core --action=index",
-      }
+      return { error: "RAG 索引不存在，请先运行: /impl-unity --init" }
+    }
+
+    // ── 加载 Xrefs（可选，不存在时降级）─────────────────────────────
+    let xrefs: XrefsIndex | null = null
+    try {
+      xrefs = JSON.parse(await Bun.file(path.join(ragDir, "xrefs.json")).text())
+    } catch {
+      // xrefs 不存在时降级，不影响基础功能
     }
 
     const retrievalLog: string[] = []
@@ -48,11 +58,17 @@ export default tool({
       if (args.verbose) retrievalLog.push(msg)
     }
 
+    // ── 热数据：classes / verified（直接访问，无需解压）──────────────
+    const allClasses  = index.hotChunks?.classes  ?? index.chunks?.filter((c: any) => c.type === "class")  ?? []
+    const allVerified = index.hotChunks?.verified ?? index.chunks?.filter((c: any) => c.type === "verified") ?? []
+
     // ==================== 阶段 1: 查找目标类 ====================
     log(`[1/6] 查找目标类: ${args.className}`)
 
-    const targetChunk = index.chunks.find(
-      (c: any) => c.type === "class" && (c.metadata.className === args.className || c.metadata.fullName?.endsWith(`.${args.className}`)),
+    const targetChunk = allClasses.find(
+      (c: any) =>
+        c.metadata.className === args.className ||
+        c.metadata.fullName?.endsWith(`.${args.className}`),
     )
 
     if (!targetChunk) {
@@ -67,7 +83,7 @@ export default tool({
     // ==================== 阶段 2: 智能判断是否需要 IDA ====================
     log(`[2/6] 智能判断是否需要 IDA`)
 
-    const needsIDA = args.forceIDA || judgeNeedsIDA(targetChunk, index)
+    const needsIDA = args.forceIDA || judgeNeedsIDA(targetChunk, allVerified)
     log(`✓ 判断结果: ${needsIDA ? "需要 IDA" : "不需要 IDA"}`)
 
     // ==================== 阶段 3: 检索依赖类 ====================
@@ -77,17 +93,13 @@ export default tool({
     const deps = targetChunk.metadata.dependencies || []
 
     for (const dep of deps) {
-      const depChunk = index.chunks.find(
-        (c: any) => c.type === "class" && (c.metadata.fullName === dep || c.metadata.className === dep),
+      const depChunk = allClasses.find(
+        (c: any) => c.metadata.fullName === dep || c.metadata.className === dep,
       )
       if (depChunk) {
         dependencies.push(depChunk)
-
-        // 如果依赖类已有验证实现，也获取
-        const verifiedDep = index.chunks.find((c: any) => c.type === "verified" && c.metadata.className === dep)
-        if (verifiedDep) {
-          dependencies.push(verifiedDep)
-        }
+        const verifiedDep = allVerified.find((c: any) => c.metadata.className === dep)
+        if (verifiedDep) dependencies.push(verifiedDep)
       }
     }
 
@@ -96,38 +108,29 @@ export default tool({
     // ==================== 阶段 4: 检索相似的已验证类 ====================
     log(`[4/6] 检索相似的已验证代码`)
 
-    const similarVerified = index.chunks
+    const similarVerified = allVerified
       .filter((c: any) => {
-        if (c.type !== "verified") return false
         if (c.metadata.className === args.className) return false
-
-        // 同命名空间
         if (c.metadata.namespace === targetChunk.metadata.namespace) return true
-
-        // 相似名称（后缀相同）
-        const targetSuffix = args.className.replace(/.*[A-Z]/, "")
+        const targetSuffix  = args.className.replace(/.*[A-Z]/, "")
         const candidateSuffix = c.metadata.className?.replace(/.*[A-Z]/, "")
-        if (targetSuffix.length > 3 && targetSuffix === candidateSuffix) return true
-
-        return false
+        return targetSuffix.length > 3 && targetSuffix === candidateSuffix
       })
       .slice(0, 3)
 
     log(`✓ 找到 ${similarVerified.length} 个相似已验证类`)
 
-    // ==================== 阶段 5: 检索 IDA 分析（如果需要）====================
-    let idaData = null
+    // ==================== 阶段 5: IDA 分析（冷数据，按需解压）====================
+    let idaData: any = null
 
     if (needsIDA) {
       log(`[5/6] 检索 IDA 分析`)
+      const coldIda = index.coldChunks?.ida ?? []
+      const compressed = coldIda.find((c: any) => c.id === `ida:${args.className}`)
+      idaData = compressed ? decompressChunk(compressed) : null
 
-      idaData = index.chunks.find((c: any) => c.type === "ida" && c.metadata.className === args.className)
-
-      if (idaData) {
-        log(`✓ 找到已缓存的 IDA 分析`)
-      } else {
-        log(`⚠ 未找到 IDA 分析，需要按需获取`)
-      }
+      if (idaData) log(`✓ 找到已缓存的 IDA 分析`)
+      else log(`⚠ 未找到 IDA 分析，需要按需获取`)
     } else {
       log(`[5/6] 跳过 IDA 分析（不需要）`)
     }
@@ -135,8 +138,26 @@ export default tool({
     // ==================== 阶段 6: 检测设计模式 ====================
     log(`[6/6] 检测设计模式`)
 
-    const patterns = detectPatterns(targetChunk, index)
+    const patterns = detectPatterns(targetChunk)
     log(`✓ 检测到 ${patterns.length} 个模式`)
+
+    // ==================== 阶段 X: 融合 Xrefs ====================
+    let xrefsContext: {
+      priority: string
+      usedBy: any[]
+      xrefPatterns: Array<{ name: string; description: string; evidence: string }>
+    } | null = null
+
+    if (xrefs) {
+      log(`[X] 融合交叉引用数据`)
+      const fullName = targetChunk.metadata.fullName ?? args.className
+      xrefsContext = {
+        priority:     getPriorityLabel(xrefs, fullName),
+        usedBy:       getUsedBy(xrefs, fullName, 5),
+        xrefPatterns: detectPatternsFromXrefs(xrefs, fullName),
+      }
+      log(`✓ 优先级: ${xrefsContext.priority}，被引用 ${xrefsContext.usedBy.length} 处`)
+    }
 
     // ==================== 生成优化的 Prompt ====================
 
@@ -147,25 +168,31 @@ export default tool({
       idaData,
       patterns,
       needsIDA,
+      xrefsContext,
     }
 
     const prompt = generatePrompt(context)
 
     // ==================== 返回结果 ====================
 
-    const summary = `✅ 智能检索完成: ${args.className}
-
-📊 检索统计:
-- 目标类: ${targetChunk.metadata.fullName}
-- 依赖类: ${dependencies.length}
-- 相似已验证: ${similarVerified.length}
-- IDA 分析: ${idaData ? "✓ 已缓存" : needsIDA ? "⚠ 需要获取" : "✗ 不需要"}
-- 设计模式: ${patterns.length}
-
-🎯 推荐策略:
-${needsIDA && !idaData ? "⚠ 建议先获取 IDA 分析以提高准确率" : "✓ 可直接生成代码"}
-
-${args.verbose ? `\n📝 检索日志:\n${retrievalLog.join("\n")}` : ""}`
+    const summary = [
+      `✅ 智能检索完成: ${args.className}`,
+      "",
+      "📊 检索统计:",
+      `- 目标类: ${targetChunk.metadata.fullName}`,
+      `- 依赖类: ${dependencies.length}`,
+      `- 相似已验证: ${similarVerified.length}`,
+      `- IDA 分析: ${idaData ? "✓ 已缓存" : needsIDA ? "⚠ 需要获取" : "✗ 不需要"}`,
+      `- 设计模式: ${patterns.length + (xrefsContext?.xrefPatterns.length ?? 0)}`,
+      xrefsContext ? `- 优先级: ${xrefsContext.priority}` : "",
+      xrefsContext?.usedBy.length ? `- Xrefs 使用示例: ${xrefsContext.usedBy.length} 处` : "",
+      "",
+      "🎯 推荐策略:",
+      needsIDA && !idaData ? "⚠ 建议先获取 IDA 分析以提高准确率" : "✓ 可直接生成代码",
+      args.verbose ? `\n📝 检索日志:\n${retrievalLog.join("\n")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
 
     return {
       output: summary,
@@ -178,110 +205,75 @@ ${args.verbose ? `\n📝 检索日志:\n${retrievalLog.join("\n")}` : ""}`
 
 // ==================== 智能判断逻辑 ====================
 
-function judgeNeedsIDA(targetChunk: any, index: any): boolean {
+function judgeNeedsIDA(targetChunk: any, allVerified: any[]): boolean {
   const className = targetChunk.metadata.className || ""
-  const fullName = targetChunk.metadata.fullName || ""
-  const complexity = targetChunk.metadata.complexity || 0
+  const fullName  = targetChunk.metadata.fullName  || ""
+  const complexity   = targetChunk.metadata.complexity  || 0
+  const methodCount  = targetChunk.metadata.methodCount || 0
 
-  // 规则 1: 关键词匹配（加密、网络、算法等）
+  // 规则 1: 高风险关键词
   const highRiskKeywords = [
-    /Encrypt/i,
-    /Decrypt/i,
-    /Hash/i,
-    /Compress/i,
-    /Network/i,
-    /Protocol/i,
-    /Serialize/i,
-    /Calculate.*Damage/i,
-    /AI.*Decision/i,
-    /Pathfind/i,
-    /Sync/i,
+    /Encrypt/i, /Decrypt/i, /Hash/i, /Compress/i,
+    /Network/i, /Protocol/i, /Serialize/i,
+    /Calculate.*Damage/i, /AI.*Decision/i, /Pathfind/i, /Sync/i,
   ]
+  for (const pattern of highRiskKeywords)
+    if (pattern.test(className) || pattern.test(fullName)) return true
 
-  for (const pattern of highRiskKeywords) {
-    if (pattern.test(className) || pattern.test(fullName)) {
-      return true
-    }
-  }
-
-  // 规则 2: 复杂度判断
-  if (complexity > 80) {
-    return true
-  }
+  // 规则 2: 复杂度
+  if (complexity > 80) return true
 
   // 规则 3: 方法数量
-  const methodCount = targetChunk.metadata.methodCount || 0
-  if (methodCount > 20) {
-    return true
-  }
+  if (methodCount > 20) return true
 
-  // 规则 4: 检查相似类是否用了 IDA
+  // 规则 4: 同命名空间相似类使用了 IDA
   const namespace = targetChunk.metadata.namespace
-  const similarClasses = index.chunks.filter(
-    (c: any) => c.type === "verified" && c.metadata.namespace === namespace && c.metadata.usedIDA === true,
+  return allVerified.some(
+    c => c.metadata.namespace === namespace && c.metadata.usedIDA === true,
   )
-
-  if (similarClasses.length > 0) {
-    return true
-  }
-
-  return false
 }
 
-// ==================== 模式检测 ====================
+// ==================== 模式检测（基于类结构）====================
 
-function detectPatterns(targetChunk: any, index: any): Array<{ name: string; description: string; evidence: string }> {
+function detectPatterns(
+  targetChunk: any,
+): Array<{ name: string; description: string; evidence: string }> {
   const patterns: Array<{ name: string; description: string; evidence: string }> = []
   const className = targetChunk.metadata.className || ""
+  const baseClass  = targetChunk.metadata.baseClass
 
-  // 模式 1: 单例
+  // 单例
   if (className.includes("Manager") || className.includes("Service") || className.includes("System")) {
-    const hasInstance = targetChunk.metadata.fields?.some((f: any) => f.name === "Instance" || f.name === "_instance")
-    if (hasInstance) {
+    const hasInstance = targetChunk.metadata.fields?.some(
+      (f: any) => f.name === "Instance" || f.name === "_instance",
+    )
+    if (hasInstance)
       patterns.push({
         name: "Singleton",
         description: "单例模式 - 全局唯一实例",
         evidence: "检测到 Instance 字段和 Manager/Service 命名",
       })
-    }
   }
 
-  // 模式 2: 对象池
-  if (className.includes("Pool")) {
-    patterns.push({
-      name: "ObjectPool",
-      description: "对象池模式 - 复用对象避免 GC",
-      evidence: "类名包含 Pool",
-    })
-  }
+  // 对象池
+  if (className.includes("Pool"))
+    patterns.push({ name: "ObjectPool", description: "对象池模式 - 复用对象避免 GC", evidence: "类名包含 Pool" })
 
-  // 模式 3: 观察者
-  if (className.includes("Event") || className.includes("Listener")) {
-    patterns.push({
-      name: "Observer",
-      description: "观察者模式 - 事件订阅/发布",
-      evidence: "类名包含 Event/Listener",
-    })
-  }
+  // 观察者
+  if (className.includes("Event") || className.includes("Listener"))
+    patterns.push({ name: "Observer", description: "观察者模式 - 事件订阅/发布", evidence: "类名包含 Event/Listener" })
 
-  // 模式 4: 工厂
-  if (className.includes("Factory") || className.includes("Builder")) {
-    patterns.push({
-      name: "Factory",
-      description: "工厂模式 - 对象创建封装",
-      evidence: "类名包含 Factory/Builder",
-    })
-  }
+  // 工厂
+  if (className.includes("Factory") || className.includes("Builder"))
+    patterns.push({ name: "Factory", description: "工厂模式 - 对象创建封装", evidence: "类名包含 Factory/Builder" })
 
-  // 模式 5: Unity 组件
-  const baseClass = targetChunk.metadata.baseClass
-  if (baseClass === "MonoBehaviour" || baseClass === "ScriptableObject") {
+  // Unity 组件
+  if (baseClass === "MonoBehaviour" || baseClass === "ScriptableObject")
     patterns.push({
       name: "UnityComponent",
       description: `Unity ${baseClass} 组件`,
       evidence: `继承自 ${baseClass}`,
     })
-  }
 
   return patterns
 }
@@ -289,7 +281,12 @@ function detectPatterns(targetChunk: any, index: any): Array<{ name: string; des
 // ==================== Prompt 生成 ====================
 
 function generatePrompt(context: any): string {
-  const { targetClass, dependencies, similarVerified, idaData, patterns } = context
+  const { targetClass, dependencies, similarVerified, idaData, patterns, xrefsContext } = context
+
+  const allPatterns = [
+    ...patterns,
+    ...(xrefsContext?.xrefPatterns ?? []),
+  ]
 
   let prompt = `# 任务：重建 Unity C# 类
 
@@ -303,10 +300,34 @@ ${targetClass.content}
 **字段数**: ${targetClass.metadata.fieldCount}
 **方法数**: ${targetClass.metadata.methodCount}
 **复杂度**: ${targetClass.metadata.complexity}
+${xrefsContext ? `**优先级**: ${xrefsContext.priority}` : ""}
 
 `
 
-  // 添加基类参考
+  // ── Xrefs 使用示例（帮助 AI 推断方法契约）────────────────────────
+  if (xrefsContext?.usedBy.length) {
+    prompt += `## 引用关系（其他类如何使用本类）
+
+> 以下信息揭示了本类的实际使用场景，帮助推断方法的预期行为。
+
+`
+    for (const u of xrefsContext.usedBy) {
+      const callerShort = u.fromClass.split(".").pop()
+      const rel = u.type === "inheritance"
+        ? `继承了本类`
+        : u.type === "interface"
+        ? `实现了本类接口`
+        : u.type === "fieldType"
+        ? `持有本类作为字段 (${u.detail ?? ""})`
+        : u.type === "methodParam"
+        ? `将本类作为方法参数 (${u.detail ?? ""})`
+        : `方法返回本类 (${u.detail ?? ""})`
+      prompt += `- \`${callerShort}\` ${rel}\n`
+    }
+    prompt += "\n"
+  }
+
+  // ── 依赖类参考 ───────────────────────────────────────────────────
   if (dependencies.length > 0) {
     prompt += `## 依赖类参考\n\n`
     for (const dep of dependencies.slice(0, 3)) {
@@ -318,7 +339,7 @@ ${targetClass.content}
     }
   }
 
-  // 添加相似已验证类
+  // ── 相似已验证类 ─────────────────────────────────────────────────
   if (similarVerified.length > 0) {
     prompt += `## 相似的已验证实现（参考）\n\n`
     for (const similar of similarVerified) {
@@ -328,24 +349,22 @@ ${targetClass.content}
     }
   }
 
-  // 添加 IDA 伪代码
+  // ── IDA 伪代码 ───────────────────────────────────────────────────
   if (idaData) {
     prompt += `## IDA Pro 伪代码（真实逻辑）\n\n`
     prompt += `**重要**: 以下是从二进制反编译的真实代码逻辑，请严格参考实现。\n\n`
     prompt += `\`\`\`c\n${idaData.content.slice(0, 2000)}\n\`\`\`\n\n`
   }
 
-  // 添加设计模式
-  if (patterns.length > 0) {
+  // ── 设计模式（结构 + Xrefs 推断合并）────────────────────────────
+  if (allPatterns.length > 0) {
     prompt += `## 检测到的设计模式\n\n`
-    for (const pattern of patterns) {
-      prompt += `### ${pattern.name}\n`
-      prompt += `${pattern.description}\n`
-      prompt += `证据: ${pattern.evidence}\n\n`
+    for (const pattern of allPatterns) {
+      prompt += `### ${pattern.name}\n${pattern.description}\n证据: ${pattern.evidence}\n\n`
     }
   }
 
-  // 添加约束
+  // ── 实现要求 ─────────────────────────────────────────────────────
   prompt += `## 实现要求
 
 1. **零 TODO/Stub**: 所有方法必须有完整实现，不允许空方法或 TODO 注释
@@ -353,6 +372,7 @@ ${targetClass.content}
 3. **Unity 生命周期**: 如果继承 MonoBehaviour，正确实现 Awake/Start/Update 等
 4. **设计模式**: 遵循检测到的设计模式实现
 ${idaData ? "5. **IDA 逻辑优先**: 有 IDA 伪代码的方法，必须按伪代码逻辑实现\n" : ""}
+${xrefsContext?.usedBy.length ? "6. **引用契约**: 参考"引用关系"中的使用示例，确保公共方法的签名和行为符合调用方预期\n" : ""}
 
 ## 输出格式
 
