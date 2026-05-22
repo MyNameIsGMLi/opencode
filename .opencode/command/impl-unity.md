@@ -41,6 +41,7 @@ await tool("unity-impl-command", {
 
 ```bash
 /impl-unity [--class ClassName] [--init] [--progress] [--smart-ida] [--analyze] [--help]
+            [--dump-dir <path>] [--script-dir <path>]
 ```
 
 ## Parameters
@@ -51,8 +52,21 @@ await tool("unity-impl-command", {
 - `--init`: 初始化 RAG 知识库（首次使用必须）
 - `--progress`: 查看实现进度和知识库统计
 - `--smart-ida`: 智能批量获取 IDA 分析（只对复杂类）
-- `--analyze`: 全量分析：生成所有 UML/架构图/流程图和核心玩法方案文档（持续更新）
+- `--analyze`: 全量分析：生成 UML 类图/架构图/核心玩法方案文档
 - `--help`: 显示此帮助信息
+
+### 路径覆盖参数（适配非标准目录结构）
+
+- `--dump-dir <path>`: dump.cs 和 script.json 所在目录（默认 `Assets/Il2CppDump`）
+- `--script-dir <path>`: C# 脚本输出目录（默认 `Assets/Scripts`）
+
+> 也可通过 `.opencode/unity-config.json` 持久化配置：
+> ```json
+> {
+>   "dumpDir": "Il2CppDump",
+>   "scriptsDir": "Assets/Scripts/Game"
+> }
+> ```
 
 ### 高级参数
 
