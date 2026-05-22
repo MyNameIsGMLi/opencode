@@ -1,370 +1,287 @@
 import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
-
-/**
- * Unity RAG Analyzer - 从 RAG 索引生成 Mermaid 类图、架构图和玩法设计文档
- *
- * 支持操作：
- * - full: 全量分析，生成所有模块的类图 + 架构图 + 玩法文档
- * - incremental: 增量分析，仅更新指定类所属模块
- */
+import { loadProjectConfig, resolveAnalysisDir } from "./unity-project-config"
 
 export default tool({
-  description: `Unity RAG 分析器 - 从 RAG 索引生成 Mermaid 图表和玩法文档。
+  description: `Unity RAG 分析器 - 从 RAG 索引生成 UML 类图、架构图和核心玩法方案文档。
 
 支持模式：
-- full: 全量分析（类图/架构图/玩法方案）
-- incremental: 增量分析（仅重建指定类所属模块）`,
+- full: 全量分析所有类，生成完整文档套件
+- incremental: 仅更新指定类所在模块的类图（轻量，不重建全局文档）`,
 
   args: {
     projectDir: tool.schema.string().describe("Unity 项目根目录"),
     mode: tool.schema.enum(["full", "incremental"]).describe("分析模式"),
-    className: tool.schema.string().optional().describe("增量模式：指定要更新的类名"),
+    className: tool.schema.string().optional().describe("增量模式：触发分析的类名"),
     verbose: tool.schema.boolean().optional().describe("显示详细日志"),
   },
 
-  async execute(args) {
-    const ragDir = path.join(args.projectDir, ".opencode", "rag")
-    const analysisDir = path.join(args.projectDir, ".opencode", "docs", "analysis")
-
+  async execute(args, _ctx) {
+    const config = await loadProjectConfig(args.projectDir)
+    const analysisDir = resolveAnalysisDir(args.projectDir, config)
     await fs.mkdir(analysisDir, { recursive: true })
 
-    const indexPath = path.join(ragDir, "index.json")
+    const indexPath = path.join(args.projectDir, ".opencode", "rag", "index.json")
     const exists = await fs.access(indexPath).then(() => true).catch(() => false)
-    if (!exists) return { error: `RAG 索引不存在，请先运行: /impl-unity --init` }
-    const index: RAGIndex = await Bun.file(indexPath).json()
+    if (!exists) return { error: "RAG 索引不存在，请先运行: /impl-unity --init" }
 
-    if (args.mode === "full") {
-      return runFullAnalysis(index, analysisDir, args.verbose ?? false)
-    }
-    return runIncrementalAnalysis(index, analysisDir, args.className ?? "", args.verbose ?? false)
+    const index = await Bun.file(indexPath).json()
+
+    if (args.mode === "full")
+      return await runFullAnalysis(index, analysisDir, args.verbose ?? false)
+
+    return await runIncrementalAnalysis(index, analysisDir, args.className ?? "", args.verbose ?? false)
   },
 })
 
-// ==================== 类型定义 ====================
+// ── 数据类型 ────────────────────────────────────────────────────────
 
-interface KnowledgeChunk {
-  id: string
-  type: "class" | "method" | "module" | "pattern" | "ida" | "verified"
-  content: string
+interface ClassChunk {
   metadata: {
-    className?: string
+    className: string
     namespace?: string
     fullName?: string
-    baseClass?: string | null
+    baseClass?: string
     interfaces?: string[]
     fieldCount?: number
     methodCount?: number
-    dependencies?: string[]
     complexity?: number
-    [key: string]: unknown
+    dependencies?: string[]
   }
+  content?: string
 }
 
-interface RAGIndex {
-  version: string
-  createdAt: string
-  updatedAt: string
-  chunks: KnowledgeChunk[]
-  stats: {
-    totalClasses: number
-    totalMethods: number
-    idaAnalyzed: number
-    verifiedImplementations: number
-  }
+// ── 辅助：清理 baseClass 的 IL2CPP 注释残留 ────────────────────────
+// dump.cs 里类定义末尾带 "// TypeDefIndex: N"，解析后 baseClass 可能含这段
+function cleanIdentifier(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const clean = raw.replace(/\/\/.*$/, "").replace(/<[^>]*>/g, "").trim()
+  return /^\w+$/.test(clean) ? clean : null
 }
 
-// ==================== 全量分析 ====================
+// ── 辅助：判断是否是游戏业务类（通用，不限于 arrows） ──────────────
+// 支持 Unity MonoBehaviour、ScriptableObject 以及 Entitas ECS 框架基类
+const GAME_BASE_CLASSES = new Set([
+  "MonoBehaviour", "ScriptableObject",
+  "ReactiveSystem", "IExecuteSystem", "IInitializeSystem",
+  "ICleanupSystem", "ITearDownSystem", "IReactiveSystem",
+  "Feature", "Systems",
+  "UiUnityView", "UnityView", "UnityViewProxy",
+])
 
-async function runFullAnalysis(index: RAGIndex, analysisDir: string, verbose: boolean) {
-  const classChunks = index.chunks.filter((c) => c.type === "class")
-  const verifiedChunks = index.chunks.filter((c) => c.type === "verified")
+function isGameClass(c: ClassChunk): boolean {
+  const base = cleanIdentifier(c.metadata.baseClass)
+  return base !== null && GAME_BASE_CLASSES.has(base)
+}
 
-  // 按顶层命名空间分组
-  const moduleMap = new Map<string, KnowledgeChunk[]>()
-  for (const c of classChunks) {
-    const moduleName = (c.metadata.namespace || "Root").split(".")[0]
-    if (!moduleMap.has(moduleName)) moduleMap.set(moduleName, [])
-    moduleMap.get(moduleName)!.push(c)
+// ── 辅助：按顶层命名空间分组 ────────────────────────────────────────
+function groupByModule(chunks: ClassChunk[]): Map<string, ClassChunk[]> {
+  const modules = new Map<string, ClassChunk[]>()
+  for (const c of chunks) {
+    const mod = (c.metadata.namespace || "Root").split(".")[0] || "Root"
+    if (!modules.has(mod)) modules.set(mod, [])
+    modules.get(mod)!.push(c)
+  }
+  return modules
+}
+
+// ── 全量分析 ────────────────────────────────────────────────────────
+
+async function runFullAnalysis(index: any, analysisDir: string, verbose: boolean) {
+  const classChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "class")
+  const verifiedChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "verified")
+  const modules = groupByModule(classChunks)
+  const written: string[] = []
+
+  if (verbose) console.log(`[analyzer] 全量分析: ${classChunks.length} 类 / ${modules.size} 模块`)
+
+  for (const [modName, classes] of modules.entries()) {
+    const filePath = path.join(analysisDir, `${modName}-class-diagram.md`)
+    await fs.writeFile(filePath, buildClassDiagram(`${modName} 模块类图`, classes, verifiedChunks))
+    written.push(filePath)
   }
 
-  const files: string[] = []
+  const archPath = path.join(analysisDir, "architecture.md")
+  await fs.writeFile(archPath, buildArchDiagram(modules, classChunks))
+  written.push(archPath)
 
-  // 为每个模块生成类图
-  for (const [moduleName, classes] of moduleMap.entries()) {
-    if (verbose) process.stdout.write(`[analyzer] 生成模块类图: ${moduleName}\n`)
-    const diagram = buildClassDiagram(classes, verifiedChunks)
-    const filePath = path.join(analysisDir, `${moduleName}-class-diagram.md`)
-    await fs.writeFile(filePath, diagram, "utf-8")
-    files.push(`${moduleName}-class-diagram.md`)
-  }
-
-  // 生成架构图
-  const archDiagram = buildArchDiagram(moduleMap, classChunks)
-  await fs.writeFile(path.join(analysisDir, "architecture.md"), archDiagram, "utf-8")
-  files.push("architecture.md")
-
-  // 生成玩法文档
-  const gameplayDoc = buildGameplayDoc(classChunks, verifiedChunks)
-  await fs.writeFile(path.join(analysisDir, "gameplay-design.md"), gameplayDoc, "utf-8")
-  files.push("gameplay-design.md")
+  const gameplayPath = path.join(analysisDir, "gameplay-design.md")
+  await fs.writeFile(gameplayPath, buildGameplayDoc(classChunks, verifiedChunks))
+  written.push(gameplayPath)
 
   return {
-    output: `✅ 全量分析完成\n\n生成文件:\n${files.map((f) => `- ${f}`).join("\n")}`,
-    files,
-    moduleCount: moduleMap.size,
-    classCount: classChunks.length,
-    verifiedCount: verifiedChunks.length,
+    output: `✅ 全量分析完成\n\n生成文件 (${written.length}):\n${written.map(f => `- ${path.basename(f)}`).join("\n")}`,
+    files: written,
   }
 }
 
-// ==================== 增量分析 ====================
+// ── 增量分析（仅更新目标模块类图，不重建全局文档）────────────────────
 
-async function runIncrementalAnalysis(
-  index: RAGIndex,
-  analysisDir: string,
-  className: string,
-  verbose: boolean,
-) {
-  const classChunks = index.chunks.filter((c) => c.type === "class")
-  const verifiedChunks = index.chunks.filter((c) => c.type === "verified")
+async function runIncrementalAnalysis(index: any, analysisDir: string, className: string, verbose: boolean) {
+  const classChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "class")
+  const verifiedChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "verified")
 
-  const targetChunk = classChunks.find(
-    (c) =>
-      c.metadata.className === className ||
-      (c.metadata.fullName && c.metadata.fullName.endsWith(`.${className}`)),
+  const target = classChunks.find(
+    c => c.metadata.className === className || c.metadata.fullName?.endsWith(`.${className}`)
   )
-
-  const moduleName = targetChunk
-    ? (targetChunk.metadata.namespace || "Root").split(".")[0]
+  const moduleName = target
+    ? (target.metadata.namespace || "Root").split(".")[0] || "Root"
     : "Root"
 
-  if (verbose) process.stdout.write(`[analyzer] 增量更新模块: ${moduleName}\n`)
+  if (verbose) console.log(`[analyzer] 增量更新模块: ${moduleName}`)
 
   const moduleClasses = classChunks.filter(
-    (c) => (c.metadata.namespace || "Root").split(".")[0] === moduleName,
+    c => (c.metadata.namespace || "Root").split(".")[0] === moduleName
   )
 
-  const moduleMap = new Map<string, KnowledgeChunk[]>()
-  for (const c of classChunks) {
-    const mod = (c.metadata.namespace || "Root").split(".")[0]
-    if (!moduleMap.has(mod)) moduleMap.set(mod, [])
-    moduleMap.get(mod)!.push(c)
-  }
-
-  const files: string[] = []
-
-  // 重建本模块类图
-  const diagram = buildClassDiagram(moduleClasses, verifiedChunks)
-  const diagramFile = `${moduleName}-class-diagram.md`
-  await fs.writeFile(path.join(analysisDir, diagramFile), diagram, "utf-8")
-  files.push(diagramFile)
-
-  // 重建玩法文档（保持跨模块引用正确）
-  const gameplayDoc = buildGameplayDoc(classChunks, verifiedChunks)
-  await fs.writeFile(path.join(analysisDir, "gameplay-design.md"), gameplayDoc, "utf-8")
-  files.push("gameplay-design.md")
-
-  // 重建架构图（从全部 classChunks 重新构建模块映射）
-  const archDiagram = buildArchDiagram(moduleMap, classChunks)
-  await fs.writeFile(path.join(analysisDir, "architecture.md"), archDiagram, "utf-8")
-  files.push("architecture.md")
+  const filePath = path.join(analysisDir, `${moduleName}-class-diagram.md`)
+  await fs.writeFile(filePath, buildClassDiagram(`${moduleName} 模块类图`, moduleClasses, verifiedChunks))
 
   return {
-    output: `✅ 增量分析完成 (${className} → 模块 ${moduleName})\n${files.map((f) => `- ${f}`).join("\n")}`,
+    output: `✅ 增量分析完成 (${className} → 模块 ${moduleName})\n- ${path.basename(filePath)}`,
     updatedModule: moduleName,
-    files,
+    files: [filePath],
   }
 }
 
-// ==================== buildClassDiagram ====================
+// ── 类图（Mermaid classDiagram） ─────────────────────────────────────
 
-function buildClassDiagram(classes: KnowledgeChunk[], verifiedChunks: KnowledgeChunk[]): string {
-  const verifiedNames = new Set(verifiedChunks.map((c) => c.metadata.className).filter(Boolean))
-
-  const lines: string[] = ["classDiagram"]
+function buildClassDiagram(title: string, classes: ClassChunk[], verifiedChunks: ClassChunk[]): string {
+  const verifiedNames = new Set(verifiedChunks.map(c => c.metadata.className))
+  const names = new Set(classes.map(c => c.metadata.className))
+  const lines = [`# ${title}`, "", "```mermaid", "classDiagram"]
 
   for (const c of classes) {
-    const name = c.metadata.className || "Unknown"
+    const name = c.metadata.className
+    const base = cleanIdentifier(c.metadata.baseClass)
+    const ifaces = (c.metadata.interfaces ?? [])
+      .map(i => cleanIdentifier(i))
+      .filter((i): i is string => i !== null && names.has(i))
     const isVerified = verifiedNames.has(name)
-    if (isVerified) {
-      lines.push(`  class ${name} {`)
-      lines.push(`    <<verified>>`)
-      lines.push(`  }`)
-    } else {
-      lines.push(`  class ${name}`)
-    }
 
-    const base = c.metadata.baseClass
-    if (base && base !== "Object" && base !== "ValueType") {
+    lines.push(`  class ${name} {`)
+    if (isVerified) lines.push(`    <<verified>>`)
+    const fc = c.metadata.fieldCount ?? 0
+    const mc = c.metadata.methodCount ?? 0
+    if (fc > 0) lines.push(`    +${fc} fields`)
+    if (mc > 0) lines.push(`    +${mc} methods()`)
+    lines.push(`  }`)
+
+    if (base && base !== "Object" && base !== "ValueType" && names.has(base))
       lines.push(`  ${base} <|-- ${name}`)
-    }
-
-    for (const iface of c.metadata.interfaces ?? []) {
-      if (iface) lines.push(`  ${iface} <|.. ${name}`)
-    }
+    for (const iface of ifaces)
+      lines.push(`  ${iface} <|.. ${name} : implements`)
   }
 
-  return `# 类图\n\n\`\`\`mermaid\n${lines.join("\n")}\n\`\`\`\n\n> 更新时间: ${new Date().toISOString()}\n`
+  lines.push("```", "", `> ${classes.length} 个类 | 更新: ${new Date().toISOString().slice(0, 10)}`)
+  return lines.join("\n")
 }
 
-// ==================== buildArchDiagram ====================
+// ── 架构图（Mermaid graph TD）────────────────────────────────────────
 
-function buildArchDiagram(
-  modules: Map<string, KnowledgeChunk[]>,
-  classChunks: KnowledgeChunk[],
-): string {
-  // className → moduleName lookup
-  const classToModule = new Map<string, string>()
-  for (const c of classChunks) {
-    const mod = (c.metadata.namespace || "Root").split(".")[0]
-    if (c.metadata.className) classToModule.set(c.metadata.className, mod)
-    if (c.metadata.fullName) classToModule.set(c.metadata.fullName, mod)
-  }
+function buildArchDiagram(modules: Map<string, ClassChunk[]>, classChunks: ClassChunk[]): string {
+  const classToMod = new Map<string, string>()
+  for (const [mod, classes] of modules.entries())
+    for (const c of classes) {
+      classToMod.set(c.metadata.className, mod)
+      if (c.metadata.fullName) classToMod.set(c.metadata.fullName, mod)
+    }
 
-  const lines: string[] = ["graph TD"]
-
-  // Module nodes
-  for (const [moduleName, classes] of modules.entries()) {
-    lines.push(`  ${moduleName}["${moduleName}\\n(${classes.length} 类)"]`)
-  }
-
-  // Cross-module edges (deduplicated)
   const edges = new Set<string>()
-  for (const c of classChunks) {
-    const srcModule = (c.metadata.namespace || "Root").split(".")[0]
-    for (const dep of c.metadata.dependencies ?? []) {
-      const dstModule = classToModule.get(dep)
-      if (dstModule && dstModule !== srcModule) {
-        const edge = `${srcModule} --> ${dstModule}`
-        if (!edges.has(edge)) {
-          edges.add(edge)
-          lines.push(`  ${edge}`)
-        }
+  for (const [mod, classes] of modules.entries())
+    for (const c of classes)
+      for (const dep of (c.metadata.dependencies ?? [])) {
+        const dm = classToMod.get(dep)
+        if (dm && dm !== mod) edges.add(`  ${mod} --> ${dm}`)
       }
-    }
-  }
 
-  return `# 架构图\n\n\`\`\`mermaid\n${lines.join("\n")}\n\`\`\`\n\n> 更新时间: ${new Date().toISOString()}\n`
+  const lines = ["# 架构图", "", "> 模块间依赖关系（箭头：依赖方 → 被依赖方）", "", "```mermaid", "graph TD"]
+  for (const [mod, classes] of modules.entries())
+    lines.push(`  ${mod}["${mod}\\n(${classes.length} 类)"]`)
+  for (const edge of edges) lines.push(edge)
+  lines.push("```", "", `> 更新: ${new Date().toISOString().slice(0, 10)}`)
+  return lines.join("\n")
 }
 
-// ==================== buildGameplayDoc ====================
+// ── 核心玩法方案文档 ─────────────────────────────────────────────────
 
-function buildGameplayDoc(classChunks: KnowledgeChunk[], verifiedChunks: KnowledgeChunk[]): string {
-  const verifiedNames = new Set(verifiedChunks.map((c) => c.metadata.className).filter(Boolean))
+function buildGameplayDoc(classChunks: ClassChunk[], verifiedChunks: ClassChunk[]): string {
+  const verifiedMap = new Map(verifiedChunks.map(c => [c.metadata.className, c]))
 
-  // Identify core gameplay classes
-  const gameplayPattern =
-    /Controller|Manager|System|Game|Player|Battle|Combat|Skill|Level|Stage|Wave|Enemy|Spawn|UI|HUD/i
+  // 游戏类：继承自 GAME_BASE_CLASSES 且类名有业务含义
+  const kw = /Controller|Manager|System|Game|Player|Battle|Combat|Skill|Level|Stage|Wave|Enemy|Spawn|UI|HUD|View|Feature|Arrow/i
+  const coreClasses = classChunks.filter(c => isGameClass(c) && kw.test(c.metadata.className ?? ""))
 
-  const coreClasses = classChunks.filter(
-    (c) =>
-      (c.metadata.baseClass === "MonoBehaviour" || c.metadata.baseClass === "ScriptableObject") &&
-      gameplayPattern.test(c.metadata.className ?? ""),
-  )
-
-  // Group definitions
-  const groups: Array<{ name: string; pattern: RegExp; classes: KnowledgeChunk[] }> = [
-    { name: "GameFlow（游戏主流程）", pattern: /Game|Level|Stage|Wave|Spawn/i, classes: [] },
+  const groups: Array<{ name: string; pattern: RegExp | null; classes: ClassChunk[] }> = [
+    { name: "GameFlow（主流程）", pattern: /Game|Level|Stage|Wave|Spawn/i, classes: [] },
+    { name: "核心玩法", pattern: /Arrow|Combat|Battle|Skill|Attack|Damage/i, classes: [] },
     { name: "Player（玩家）", pattern: /Player|Character/i, classes: [] },
-    { name: "Combat（战斗）", pattern: /Battle|Combat|Skill|Enemy|Attack|Damage/i, classes: [] },
-    { name: "UI（界面）", pattern: /UI|HUD|Panel|Menu|Screen/i, classes: [] },
-    { name: "其他系统", pattern: /.*/, classes: [] },
+    { name: "UI（界面）", pattern: /UI|HUD|Panel|Menu|Screen|View|Display/i, classes: [] },
+    { name: "其他系统", pattern: null, classes: [] },
   ]
 
-  // Assign each core class to first matching group (last group is catch-all)
   for (const c of coreClasses) {
-    const name = c.metadata.className ?? ""
-    const matchIndex = groups.slice(0, -1).findIndex((g) => g.pattern.test(name))
-    groups[matchIndex === -1 ? groups.length - 1 : matchIndex].classes.push(c)
+    const mi = groups.slice(0, -1).findIndex(g => g.pattern!.test(c.metadata.className ?? ""))
+    groups[mi === -1 ? groups.length - 1 : mi].classes.push(c)
   }
 
-  const sections: string[] = []
+  const lines = [
+    "# 核心玩法方案",
+    "",
+    `> 自动分析自 IL2CPP dump.cs，共识别 ${coreClasses.length} 个核心玩法类`,
+    `> 更新: ${new Date().toISOString().slice(0, 10)}`,
+    "",
+    "---",
+    "",
+  ]
 
-  const header = `# 核心玩法方案
+  for (const g of groups) {
+    if (!g.classes.length) continue
+    lines.push(`## ${g.name}（${g.classes.length} 个类）`, "")
 
-> 自动分析自 IL2CPP dump.cs，共识别 ${coreClasses.length} 个核心玩法类
-> 更新时间: ${new Date().toISOString()}
-
----`
-  sections.push(header)
-
-  for (const group of groups) {
-    if (group.classes.length === 0) continue
-
-    sections.push(`\n## ${group.name}`)
-
-    // 交互时序图
-    const participants = group.classes.slice(0, 5).map((c) => c.metadata.className ?? "Unknown")
-    const seqLines: string[] = ["sequenceDiagram"]
-    for (const p of participants) {
-      seqLines.push(`  participant ${p}`)
-    }
-    // Edges from dependency relationships within the group
-    const groupNames = new Set(group.classes.map((c) => c.metadata.className))
-    const seqEdges = new Set<string>()
-    for (const c of group.classes) {
-      for (const dep of c.metadata.dependencies ?? []) {
-        if (groupNames.has(dep) && dep !== c.metadata.className) {
-          const edge = `  ${c.metadata.className}->>+${dep}: call`
-          if (!seqEdges.has(edge)) {
-            seqEdges.add(edge)
-            seqLines.push(edge)
-          }
+    // 时序图
+    const names = g.classes.slice(0, 5).map(c => c.metadata.className)
+    lines.push("### 交互时序图", "", "```mermaid", "sequenceDiagram")
+    for (const n of names) lines.push(`  participant ${n}`)
+    for (const c of g.classes.slice(0, 5))
+      for (const dep of (c.metadata.dependencies ?? []))
+        if (names.includes(dep)) {
+          lines.push(`  ${c.metadata.className}->>+${dep}: 调用`)
+          lines.push(`  ${dep}-->>-${c.metadata.className}: 返回`)
         }
+    lines.push("```", "")
+
+    // 类清单
+    lines.push("### 类清单", "", "| 类名 | 字段 | 方法 | 复杂度 | 已验证 | 基类 |", "|------|------|------|--------|--------|------|")
+    for (const c of g.classes) {
+      const base = cleanIdentifier(c.metadata.baseClass) ?? "-"
+      const isV = verifiedMap.has(c.metadata.className) ? "✅" : "⬜"
+      lines.push(`| \`${c.metadata.className}\` | ${c.metadata.fieldCount ?? "-"} | ${c.metadata.methodCount ?? "-"} | ${c.metadata.complexity ?? "-"} | ${isV} | ${base} |`)
+    }
+    lines.push("")
+
+    // 状态机：从类名推断（类名含 State/Phase/Stage/Status 词才生成）
+    const stateClasses = g.classes.filter(c => /State|Phase|Stage|Status/i.test(c.metadata.className ?? ""))
+    if (stateClasses.length > 0) {
+      lines.push("### 状态机推断", "")
+      lines.push("```mermaid", "stateDiagram-v2")
+      lines.push("  [*] --> Idle", "  Idle --> Active : 开始", "  Active --> Paused : 暂停", "  Paused --> Active : 恢复", "  Active --> [*] : 结束")
+      lines.push("```", "", `> 注：基于类名关键词推断（${stateClasses.map(c => c.metadata.className).join(", ")}），需人工验证`, "")
+    }
+
+    // 已验证摘要
+    const vi = g.classes.filter(c => verifiedMap.has(c.metadata.className))
+    if (vi.length) {
+      lines.push("### 已验证实现摘要", "")
+      for (const c of vi) {
+        const code = (verifiedMap.get(c.metadata.className) as any).content as string
+        lines.push(`#### \`${c.metadata.className}\``, "", "```csharp", code.slice(0, 500), "// ...", "```", "")
       }
     }
 
-    sections.push(`### 交互时序图\n\n\`\`\`mermaid\n${seqLines.join("\n")}\n\`\`\``)
-
-    // 类清单
-    const tableRows = group.classes
-      .map((c) => {
-        const name = c.metadata.className ?? "Unknown"
-        const fields = c.metadata.fieldCount ?? 0
-        const methods = c.metadata.methodCount ?? 0
-        const complexity = c.metadata.complexity ?? 0
-        const verified = verifiedNames.has(name) ? "✅" : "⬜"
-        const base = c.metadata.baseClass ?? ""
-        return `| ${name} | ${fields} | ${methods} | ${complexity} | ${verified} | ${base} |`
-      })
-      .join("\n")
-
-    sections.push(
-      `### 类清单\n\n| 类名 | 字段数 | 方法数 | 复杂度 | 已验证 | 基类 |\n|------|--------|--------|--------|--------|------|\n${tableRows}`,
-    )
-
-    // 状态机推断（仅当内容含 State/Phase 时）
-    const hasStateful = group.classes.some((c) => /State|Phase/i.test(c.content))
-    if (hasStateful) {
-      sections.push(`### 状态机推断
-
-\`\`\`mermaid
-stateDiagram-v2
-  [*] --> Idle
-  Idle --> Active : 开始
-  Active --> Paused : 暂停
-  Paused --> Active : 恢复
-  Active --> [*] : 结束
-\`\`\`
-
-> ⚠️ 以上状态机为自动推断，需人工验证`)
-    }
-
-    // 已验证实现摘要
-    const verifiedInGroup = group.classes
-      .map((c) => verifiedChunks.find((v) => v.metadata.className === c.metadata.className))
-      .filter((v): v is KnowledgeChunk => v !== undefined)
-
-    if (verifiedInGroup.length > 0) {
-      const summaryLines = verifiedInGroup.map((v) => {
-        const preview = v.content.slice(0, 300).replace(/\n/g, "\n  ")
-        return `**${v.metadata.className}**:\n\`\`\`csharp\n  ${preview}${v.content.length > 300 ? "\n  ..." : ""}\n\`\`\``
-      })
-      sections.push(`### 已验证实现摘要\n\n${summaryLines.join("\n\n")}`)
-    }
+    lines.push("---", "")
   }
 
-  return sections.join("\n")
+  return lines.join("\n")
 }
