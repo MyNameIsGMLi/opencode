@@ -512,31 +512,42 @@ interface ClassInfo {
 
 function parseClasses(dumpContent: string): ClassInfo[] {
   const classes: ClassInfo[] = []
-  const classRegex = /(?:public |internal |private |protected )*(?:abstract |sealed )?(?:class|struct|interface) (\w+)/g
   const lines = dumpContent.split("\n")
 
   let currentClass: ClassInfo | null = null
   let braceDepth = 0
+  // Track current namespace from "// Namespace: Foo" comments (IL2CPP dump.cs format)
+  let currentNamespace = ""
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
 
-    // 检测类定义
+    // IL2CPP dump.cs uses "// Namespace: Foo" comments (not namespace {} blocks)
+    const nsMatch = line.match(/^\/\/ Namespace:\s*(.*)$/)
+    if (nsMatch) {
+      currentNamespace = nsMatch[1].trim()
+      continue
+    }
+
+    // Also support traditional "namespace Foo {" blocks for non-IL2CPP sources
+    const nsBlockMatch = line.match(/^namespace\s+([\w.]+)/)
+    if (nsBlockMatch) {
+      currentNamespace = nsBlockMatch[1]
+    }
+
+    // 检测类定义（仅在顶层 braceDepth === 0 时）
     const classMatch = line.match(
-      /(?:public |internal |private |protected )*(?:abstract |sealed )?(class|struct|interface) (\w+)/,
+      /^(?:\[.*?\]\s*)*(?:public |internal |private |protected )*(?:abstract |sealed |static )*(?:partial )*(class|struct|interface|enum)\s+(\w+)/,
     )
     if (classMatch && braceDepth === 0) {
-      if (currentClass) {
-        classes.push(currentClass)
-      }
+      if (currentClass) classes.push(currentClass)
 
       const className = classMatch[2]
-      const namespace = extractNamespace(lines, i)
-
+      const ns = currentNamespace
       currentClass = {
         name: className,
-        namespace,
-        fullName: namespace ? `${namespace}.${className}` : className,
+        namespace: ns,
+        fullName: ns ? `${ns}.${className}` : className,
         baseClass: extractBaseClass(line),
         interfaces: extractInterfaces(line),
         fields: [],
@@ -547,55 +558,75 @@ function parseClasses(dumpContent: string): ClassInfo[] {
     }
 
     // 跟踪花括号深度
-    if (line.includes("{")) braceDepth++
-    if (line.includes("}")) braceDepth--
+    for (const ch of line) {
+      if (ch === "{") braceDepth++
+      else if (ch === "}") braceDepth--
+    }
 
-    // 解析字段和方法
+    // 解析字段和方法（braceDepth === 1 表示在类体内顶层）
     if (currentClass && braceDepth === 1) {
-      if (line.match(/^\w+\s+\w+;/)) {
-        // 字段
-        const parts = line.split(/\s+/)
-        if (parts.length >= 2) {
-          currentClass.fields.push({ name: parts[1].replace(";", ""), type: parts[0] })
-        }
-      } else if (line.match(/^\w+\s+\w+\(/)) {
-        // 方法
-        const methodMatch = line.match(/(\w+)\s+(\w+)\((.*?)\)/)
-        if (methodMatch) {
+      // 字段：匹配 "private/public/protected [readonly/static] Type name; // offset"
+      // dump.cs 字段格式：访问修饰符 + 可选修饰符 + 类型 + 名称 + ; (后面可能有 // 注释)
+      const fieldMatch = line.match(
+        /^(?:public |private |protected |internal )+(?:static |readonly |const )*(\S+)\s+(\w+)\s*;/,
+      )
+      if (fieldMatch) {
+        currentClass.fields.push({ name: fieldMatch[2], type: fieldMatch[1] })
+      }
+
+      // 方法：匹配访问修饰符 + 返回类型 + 方法名(...)
+      // dump.cs 方法格式：不以 // 开头，含括号
+      const methodMatch = line.match(
+        /^(?:public |private |protected |internal |static |virtual |override |sealed |abstract |extern )+(?:\S+\s+)?(\w+)\s*\(/,
+      )
+      if (methodMatch && !line.startsWith("//") && !line.startsWith("[")) {
+        // 提取返回类型和方法名
+        const sigMatch = line.match(
+          /(?:public |private |protected |internal |static |virtual |override |sealed |abstract |extern )*(\S+)\s+(\w+)\s*\((.*?)\)/,
+        )
+        if (sigMatch) {
           currentClass.methods.push({
-            name: methodMatch[2],
+            name: sigMatch[2],
             signature: line,
-            returnType: methodMatch[1],
-            parameters: methodMatch[3].split(",").map((p) => p.trim()),
+            returnType: sigMatch[1],
+            parameters: sigMatch[3] ? sigMatch[3].split(",").map((p) => p.trim()).filter(Boolean) : [],
           })
         }
       }
     }
   }
 
-  if (currentClass) {
-    classes.push(currentClass)
-  }
+  if (currentClass) classes.push(currentClass)
 
   return classes
 }
 
-function extractNamespace(lines: string[], classLineIndex: number): string {
-  for (let i = classLineIndex; i >= 0; i--) {
-    const match = lines[i].match(/namespace\s+([\w.]+)/)
-    if (match) return match[1]
-  }
+function extractNamespace(_lines: string[], _classLineIndex: number): string {
+  // Kept for backward compatibility; actual namespace extraction now happens
+  // inline in parseClasses via "// Namespace:" comment tracking
   return ""
 }
 
 function extractBaseClass(line: string): string | null {
-  const match = line.match(/:\s*(\w+)/)
-  return match ? match[1] : null
+  // Strip trailing IL2CPP comment e.g. "// TypeDefIndex: 4366"
+  const cleanLine = line.replace(/\/\/.*$/, "").trim()
+  const colonIdx = cleanLine.indexOf(":")
+  if (colonIdx === -1) return null
+  const afterColon = cleanLine.slice(colonIdx + 1).trim()
+  // First token before comma, strip generics, keep only valid identifier
+  const first = afterColon.split(",")[0].trim().replace(/<[^>]*>/g, "").trim()
+  // Only return if it looks like a valid C# identifier
+  return /^\w+$/.test(first) ? first : null
 }
 
 function extractInterfaces(line: string): string[] {
-  const match = line.match(/:\s*\w+,\s*(.+)/)
-  return match ? match[1].split(",").map((i) => i.trim()) : []
+  const cleanLine = line.replace(/\/\/.*$/, "").trim()
+  const colonIdx = cleanLine.indexOf(":")
+  if (colonIdx === -1) return []
+  const afterColon = cleanLine.slice(colonIdx + 1).trim()
+  const parts = afterColon.split(",").map((p) => p.trim().replace(/<[^>]*>/g, "").trim()).filter((p) => /^\w+$/.test(p))
+  // Skip the first (it's the base class), rest are interfaces
+  return parts.slice(1)
 }
 
 function buildDependencyGraph(classes: ClassInfo[]): Map<string, string[]> {
