@@ -2,6 +2,9 @@ import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { loadProjectConfig, resolveScriptJsonPath } from "./unity-project-config"
+import {
+  isV2, migrateV1toV2, decompressArray, compressArray,
+} from "./unity-rag-cache"
 
 /**
  * Unity RAG IDA 集成
@@ -44,8 +47,8 @@ export default tool({
     // 加载 RAG 索引
     let index: any
     try {
-      const content = await fs.readFile(indexPath, "utf-8")
-      index = JSON.parse(content)
+      const raw = JSON.parse(await Bun.file(indexPath).text())
+      index = isV2(raw) ? raw : migrateV1toV2(raw)
     } catch {
       return {
         error: "RAG 索引不存在，请先运行: unity-rag-core --action=index",
@@ -67,7 +70,7 @@ export default tool({
       }
 
       // 查找模块下的所有类
-      const moduleChunk = index.chunks.find((c: any) => c.type === "module" && c.metadata.moduleName === args.moduleName)
+      const moduleChunk = index.hotChunks.modules.find((c: any) => c.metadata.moduleName === args.moduleName)
 
       if (!moduleChunk) {
         return { error: `未找到模块: ${args.moduleName}` }
@@ -76,17 +79,18 @@ export default tool({
       targetClasses = moduleChunk.metadata.classes || []
     } else if (args.mode === "smart") {
       // 智能模式：分析所有需要但未缓存 IDA 的类
-      const allClasses = index.chunks.filter((c: any) => c.type === "class")
+      const allClasses = index.hotChunks.classes
 
       for (const cls of allClasses) {
         const className = cls.metadata.className
 
-        // 检查是否已有 IDA 缓存
-        const hasIDA = index.chunks.some((c: any) => c.type === "ida" && c.metadata.className === className)
+        // 检查是否已有 IDA 缓存（从冷数据 blob 中查找）
+        const cachedIdaChunks = decompressArray(index.coldChunks.idaBlob)
+        const hasIDA = cachedIdaChunks.some((c: any) => c.metadata?.className === className)
 
         if (!hasIDA) {
-          // 判断是否需要 IDA
-          const needsIDA = judgeNeedsIDA(cls)
+          // 判断是否需要 IDA（传入已验证代码供规则4使用）
+          const needsIDA = judgeNeedsIDA(cls, index.hotChunks.verified)
           if (needsIDA) {
             targetClasses.push(className)
           }
@@ -169,8 +173,8 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 
       try {
         // 查找类信息
-        const classChunk = index.chunks.find(
-          (c: any) => c.type === "class" && (c.metadata.className === className || c.metadata.fullName?.endsWith(`.${className}`)),
+        const classChunk = index.hotChunks.classes.find(
+          (c: any) => c.metadata.className === className || c.metadata.fullName?.endsWith(`.${className}`),
         )
 
         if (!classChunk) {
@@ -228,14 +232,17 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
           },
         }
 
-        // 更新索引
-        const existingIndex = index.chunks.findIndex((c: any) => c.id === idaChunk.id)
-        if (existingIndex >= 0) {
-          index.chunks[existingIndex] = idaChunk
+        // 更新冷数据 idaBlob（解压 → 更新/追加 → 重压）
+        const idaChunks = decompressArray(index.coldChunks.idaBlob)
+        const existingIdx = idaChunks.findIndex((c: any) => c.id === idaChunk.id)
+        if (existingIdx >= 0) {
+          idaChunks[existingIdx] = idaChunk
         } else {
-          index.chunks.push(idaChunk)
-          index.stats.idaAnalyzed++
+          idaChunks.push(idaChunk)
         }
+        index.coldChunks.idaBlob = compressArray(idaChunks)
+        index.coldChunks.idaCount = idaChunks.length
+        index.stats.idaAnalyzed = idaChunks.length
 
         results.push({ className, success: true })
         successCount++
@@ -287,38 +294,22 @@ ${
 
 // ==================== 辅助函数 ====================
 
-function judgeNeedsIDA(classChunk: any): boolean {
+// 注意：P1 阶段会将此函数提取为共享函数，目前先在此文件内对齐规则
+function judgeNeedsIDA(classChunk: any, allVerified: any[] = []): boolean {
   const className = classChunk.metadata.className || ""
+  const fullName = classChunk.metadata.fullName || ""
   const complexity = classChunk.metadata.complexity || 0
+  const methodCount = classChunk.metadata.methodCount || 0
 
-  // 高风险关键词
-  const highRiskKeywords = [
-    /Encrypt/i,
-    /Decrypt/i,
-    /Hash/i,
-    /Network/i,
-    /Protocol/i,
-    /Serialize/i,
-    /Calculate.*Damage/i,
-    /AI/i,
-    /Pathfind/i,
+  const keywords = [
+    /Encrypt/i, /Decrypt/i, /Hash/i, /Compress/i,
+    /Network/i, /Protocol/i, /Serialize/i,
+    /Calculate.*Damage/i, /AI/i, /Pathfind/i, /Sync/i,
   ]
-
-  for (const pattern of highRiskKeywords) {
-    if (pattern.test(className)) {
-      return true
-    }
-  }
-
-  // 复杂度高
-  if (complexity > 80) {
-    return true
-  }
-
-  // 方法多
-  if (classChunk.metadata.methodCount > 20) {
-    return true
-  }
-
-  return false
+  if (keywords.some(k => k.test(className) || k.test(fullName))) return true
+  if (complexity > 80) return true
+  if (methodCount > 20) return true
+  // 规则4：同命名空间相似类已使用 IDA
+  const ns = classChunk.metadata.namespace
+  return allVerified.some((v: any) => v.metadata?.namespace === ns && v.metadata?.usedIDA === true)
 }
