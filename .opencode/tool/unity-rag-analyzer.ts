@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { loadProjectConfig, resolveAnalysisDir } from "./unity-project-config"
+import { isV2, migrateV1toV2 } from "./unity-rag-cache"
 
 export default tool({
   description: `Unity RAG 分析器 - 从 RAG 索引生成 UML 类图、架构图和核心玩法方案文档。
@@ -26,7 +27,8 @@ export default tool({
     const exists = await fs.access(indexPath).then(() => true).catch(() => false)
     if (!exists) return { error: "RAG 索引不存在，请先运行: /impl-unity --init" }
 
-    const index = await Bun.file(indexPath).json()
+    const raw = await Bun.file(indexPath).json()
+    const index = isV2(raw) ? raw : migrateV1toV2(raw)
 
     if (args.mode === "full")
       return await runFullAnalysis(index, analysisDir, args.verbose ?? false)
@@ -89,8 +91,8 @@ function groupByModule(chunks: ClassChunk[]): Map<string, ClassChunk[]> {
 // ── 全量分析 ────────────────────────────────────────────────────────
 
 async function runFullAnalysis(index: any, analysisDir: string, verbose: boolean) {
-  const classChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "class")
-  const verifiedChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "verified")
+  const classChunks: ClassChunk[] = index.hotChunks?.classes ?? []
+  const verifiedChunks: ClassChunk[] = index.hotChunks?.verified ?? []
   const modules = groupByModule(classChunks)
   const written: string[] = []
 
@@ -103,7 +105,7 @@ async function runFullAnalysis(index: any, analysisDir: string, verbose: boolean
   }
 
   const archPath = path.join(analysisDir, "architecture.md")
-  await fs.writeFile(archPath, buildArchDiagram(modules, classChunks))
+  await fs.writeFile(archPath, buildArchDiagram(modules))
   written.push(archPath)
 
   const gameplayPath = path.join(analysisDir, "gameplay-design.md")
@@ -119,8 +121,8 @@ async function runFullAnalysis(index: any, analysisDir: string, verbose: boolean
 // ── 增量分析（仅更新目标模块类图，不重建全局文档）────────────────────
 
 async function runIncrementalAnalysis(index: any, analysisDir: string, className: string, verbose: boolean) {
-  const classChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "class")
-  const verifiedChunks: ClassChunk[] = index.chunks.filter((c: any) => c.type === "verified")
+  const classChunks: ClassChunk[] = index.hotChunks?.classes ?? []
+  const verifiedChunks: ClassChunk[] = index.hotChunks?.verified ?? []
 
   const target = classChunks.find(
     c => c.metadata.className === className || c.metadata.fullName?.endsWith(`.${className}`)
@@ -180,7 +182,7 @@ function buildClassDiagram(title: string, classes: ClassChunk[], verifiedChunks:
 
 // ── 架构图（Mermaid graph TD）────────────────────────────────────────
 
-function buildArchDiagram(modules: Map<string, ClassChunk[]>, classChunks: ClassChunk[]): string {
+function buildArchDiagram(modules: Map<string, ClassChunk[]>): string {
   const classToMod = new Map<string, string>()
   for (const [mod, classes] of modules.entries())
     for (const c of classes) {
@@ -210,12 +212,12 @@ function buildGameplayDoc(classChunks: ClassChunk[], verifiedChunks: ClassChunk[
   const verifiedMap = new Map(verifiedChunks.map(c => [c.metadata.className, c]))
 
   // 游戏类：继承自 GAME_BASE_CLASSES 且类名有业务含义
-  const kw = /Controller|Manager|System|Game|Player|Battle|Combat|Skill|Level|Stage|Wave|Enemy|Spawn|UI|HUD|View|Feature|Arrow/i
+  const kw = /Controller|Manager|System|Game|Player|Battle|Combat|Skill|Level|Stage|Wave|Enemy|Spawn|UI|HUD|View|Feature/i
   const coreClasses = classChunks.filter(c => isGameClass(c) && kw.test(c.metadata.className ?? ""))
 
   const groups: Array<{ name: string; pattern: RegExp | null; classes: ClassChunk[] }> = [
     { name: "GameFlow（主流程）", pattern: /Game|Level|Stage|Wave|Spawn/i, classes: [] },
-    { name: "核心玩法", pattern: /Arrow|Combat|Battle|Skill|Attack|Damage/i, classes: [] },
+    { name: "核心玩法", pattern: /Combat|Battle|Skill|Attack|Damage|Weapon|Projectile/i, classes: [] },
     { name: "Player（玩家）", pattern: /Player|Character/i, classes: [] },
     { name: "UI（界面）", pattern: /UI|HUD|Panel|Menu|Screen|View|Display/i, classes: [] },
     { name: "其他系统", pattern: null, classes: [] },
