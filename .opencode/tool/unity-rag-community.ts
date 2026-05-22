@@ -20,16 +20,9 @@ export default tool({
     const ragDir = path.join(args.projectDir, ".opencode", "rag")
     const xrefsPath = path.join(ragDir, "xrefs.json")
     const commPath = path.join(ragDir, "communities.json")
-    const scriptPath = path.join(args.projectDir, ".opencode", "scripts", "detect_communities.py")
+    const scriptPath = path.join((import.meta as any).dir, "..", "scripts", "detect_communities.py")
 
     if (args.action === "detect") {
-      // 检查 xrefs.json 是否存在
-      const xrefsExists = await fs.access(xrefsPath).then(() => true).catch(() => false)
-      if (!xrefsExists) {
-        return { error: "xrefs.json 不存在，请先运行 /impl-unity --init 重建索引" }
-      }
-
-      // 检查脚本存在
       const scriptExists = await fs.access(scriptPath).then(() => true).catch(() => false)
       if (!scriptExists) {
         return { error: `检测脚本不存在: ${scriptPath}` }
