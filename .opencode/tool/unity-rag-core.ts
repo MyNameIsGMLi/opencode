@@ -2,10 +2,15 @@ import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { loadProjectConfig, resolveDumpCsPath, resolveScriptJsonPath } from "./unity-project-config"
+import {
+  compressBatch, compressChunk, decompressChunk, migrateV1toV2, isV2, paginate,
+  type RAGIndexV2, type HotChunks,
+} from "./unity-rag-cache"
+import { buildXrefsIndex, type ClassInfoLike } from "./unity-rag-xrefs"
 
 /**
  * Unity RAG Core - 渐进式知识库系统
- * 
+ *
  * 核心功能：
  * 1. 静态知识索引（dump.cs + script.json）
  * 2. 增量 IDA 集成（按需获取）
@@ -21,11 +26,12 @@ export default tool({
 - retrieve: 智能检索相关上下文
 - add-ida: 添加 IDA 分析结果
 - add-verified: 添加已验证的生成代码
-- stats: 查看知识库统计`,
+- stats: 查看知识库统计
+- list-classes: 分页列出所有类`,
 
   args: {
     action: tool.schema
-      .enum(["index", "retrieve", "add-ida", "add-verified", "stats", "search"])
+      .enum(["index", "retrieve", "add-ida", "add-verified", "stats", "search", "list-classes"])
       .describe("操作类型"),
 
     projectDir: tool.schema.string().describe("Unity 项目根目录"),
@@ -53,6 +59,10 @@ export default tool({
 
     // 通用参数
     force: tool.schema.boolean().optional().describe("强制重建索引"),
+
+    // 分页参数
+    offset: tool.schema.number().optional().describe("分页起始位置（默认 0）"),
+    limit: tool.schema.number().optional().describe("每页数量（默认 100，最大 1000）"),
   },
 
   async execute(args, ctx) {
@@ -77,6 +87,9 @@ export default tool({
 
       case "search":
         return await semanticSearch(args, ctx, ragDir)
+
+      case "list-classes":
+        return await listClasses(args, ragDir)
 
       default:
         return { error: `Unknown action: ${args.action}` }
@@ -103,19 +116,6 @@ interface KnowledgeChunk {
   embedding?: number[] // 向量嵌入（后续集成）
 }
 
-interface RAGIndex {
-  version: string
-  createdAt: string
-  updatedAt: string
-  chunks: KnowledgeChunk[]
-  stats: {
-    totalClasses: number
-    totalMethods: number
-    idaAnalyzed: number
-    verifiedImplementations: number
-  }
-}
-
 // ==================== 1. 静态知识索引 ====================
 
 async function indexStatic(args: any, ctx: any, ragDir: string) {
@@ -124,7 +124,7 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
   // 检查是否已存在索引
   if (!args.force) {
     try {
-      const existing = await fs.readFile(indexPath, "utf-8")
+      await fs.readFile(indexPath, "utf-8")
       return {
         output: "索引已存在。使用 --force 强制重建。",
         indexPath,
@@ -215,21 +215,45 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
     })
   }
 
-  // 保存索引
-  const index: RAGIndex = {
-    version: "1.0.0",
+  // ── 构建 v2 分层压缩索引 ────────────────────────────────────────
+  const hotChunks: HotChunks = {
+    classes:  chunks.filter(c => c.type === "class"),
+    modules:  chunks.filter(c => c.type === "module"),
+    verified: chunks.filter(c => c.type === "verified"),
+  }
+  const methodChunks = chunks.filter(c => c.type === "method")
+
+  const compressedMethods = compressBatch(methodChunks)
+  const originalBytes = methodChunks.reduce(
+    (sum, c) => sum + Buffer.byteLength(JSON.stringify(c), "utf-8"), 0,
+  )
+  const compressedBytes = compressedMethods.reduce(
+    (sum, c) => sum + Buffer.byteLength(c.compressed, "utf-8"), 0,
+  )
+  const compressionRatio =
+    compressedBytes > 0 ? Math.round((originalBytes / compressedBytes) * 10) / 10 : 0
+
+  const index: RAGIndexV2 = {
+    version: "2.0.0",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    chunks,
+    hotChunks,
+    coldChunks: { methods: compressedMethods, ida: [] },
     stats: {
       totalClasses: classes.length,
-      totalMethods: chunks.filter((c) => c.type === "method").length,
+      totalMethods: methodChunks.length,
       idaAnalyzed: 0,
       verifiedImplementations: 0,
+      compressionRatio,
     },
   }
 
   await fs.writeFile(indexPath, JSON.stringify(index, null, 2), "utf-8")
+
+  // ── 构建交叉引用索引 ─────────────────────────────────────────────
+  const xrefs = buildXrefsIndex(classes as ClassInfoLike[])
+  const xrefsPath = path.join(ragDir, "xrefs.json")
+  await fs.writeFile(xrefsPath, JSON.stringify(xrefs, null, 2), "utf-8")
 
   return {
     output: `✅ 静态知识索引完成！
@@ -238,10 +262,15 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
 总方法数: ${index.stats.totalMethods}
 总 chunks: ${chunks.length}
 模块数: ${modules.size}
+压缩率: ${compressionRatio}x (method chunks)
+
+交叉引用: ${xrefs.stats.totalXrefs} 条
+Top 被引用: ${xrefs.stats.topReferenced.slice(0, 3).map(t => t.className).join(", ")}
 
 索引保存至: ${indexPath}`,
     stats: index.stats,
     indexPath,
+    xrefsStats: xrefs.stats,
   }
 }
 
@@ -250,10 +279,10 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
 async function retrieveContext(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
 
-  let index: RAGIndex
+  let index: RAGIndexV2
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "索引不存在，请先运行 index 操作" }
   }
@@ -262,7 +291,7 @@ async function retrieveContext(args: any, ctx: any, ragDir: string) {
   const layers = args.layers || ["static", "verified"]
 
   // 查找目标类
-  const targetChunk = index.chunks.find((c) => c.type === "class" && c.metadata.className === className)
+  const targetChunk = index.hotChunks.classes.find((c) => c.metadata.className === className)
 
   if (!targetChunk) {
     return { error: `未找到类: ${className}` }
@@ -281,19 +310,18 @@ async function retrieveContext(args: any, ctx: any, ragDir: string) {
   if (layers.includes("static")) {
     // 获取依赖类
     const deps = targetChunk.metadata.dependencies || []
-    context.dependencies = index.chunks.filter(
-      (c) => c.type === "class" && deps.includes(c.metadata.fullName || c.metadata.className),
+    context.dependencies = index.hotChunks.classes.filter(
+      (c) => deps.includes(c.metadata.fullName || c.metadata.className),
     )
 
-    // 获取方法
-    context.methods = index.chunks.filter(
-      (c) => c.type === "method" && c.metadata.className === targetChunk.metadata.fullName,
-    )
+    // method chunks 是冷数据，此处暂不展开（避免全量解压）
+    context.methods = []
   }
 
   // Layer 2: IDA 分析
   if (layers.includes("ida")) {
-    const idaChunk = index.chunks.find((c) => c.type === "ida" && c.metadata.className === className)
+    const compressed = index.coldChunks.ida.find(c => c.id === `ida:${className}`)
+    const idaChunk = compressed ? decompressChunk(compressed) : undefined
     if (idaChunk) {
       context.ida = idaChunk
     }
@@ -301,16 +329,15 @@ async function retrieveContext(args: any, ctx: any, ragDir: string) {
 
   // Layer 3: 已验证代码
   if (layers.includes("verified")) {
-    const verifiedChunk = index.chunks.find((c) => c.type === "verified" && c.metadata.className === className)
+    const verifiedChunk = index.hotChunks.verified.find((c) => c.metadata.className === className)
     if (verifiedChunk) {
       context.verified = verifiedChunk
     }
 
     // 查找相似的已验证类（同命名空间或相似名称）
-    context.similar = index.chunks
+    context.similar = index.hotChunks.verified
       .filter(
         (c) =>
-          c.type === "verified" &&
           c.metadata.namespace === targetChunk.metadata.namespace &&
           c.metadata.className !== className,
       )
@@ -334,19 +361,18 @@ IDA 分析: ${context.ida ? "✓" : "✗"}
 async function addIdaAnalysis(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
 
-  let index: RAGIndex
+  let index: RAGIndexV2
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "索引不存在，请先运行 index 操作" }
   }
 
   const idaData = JSON.parse(args.idaData || "{}")
-
-  const chunk: KnowledgeChunk = {
+  const chunk = {
     id: `ida:${idaData.className}`,
-    type: "ida",
+    type: "ida" as const,
     content: idaData.pseudocode || "",
     metadata: {
       className: idaData.className,
@@ -355,13 +381,13 @@ async function addIdaAnalysis(args: any, ctx: any, ragDir: string) {
       fetchedAt: new Date().toISOString(),
     },
   }
+  const compressed = compressChunk(chunk)
 
-  // 检查是否已存在
-  const existingIndex = index.chunks.findIndex((c) => c.id === chunk.id)
-  if (existingIndex >= 0) {
-    index.chunks[existingIndex] = chunk
+  const existingIdx = index.coldChunks.ida.findIndex(c => c.id === compressed.id)
+  if (existingIdx >= 0) {
+    index.coldChunks.ida[existingIdx] = compressed
   } else {
-    index.chunks.push(chunk)
+    index.coldChunks.ida.push(compressed)
     index.stats.idaAnalyzed++
   }
 
@@ -379,20 +405,19 @@ async function addIdaAnalysis(args: any, ctx: any, ragDir: string) {
 async function addVerifiedCode(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
 
-  let index: RAGIndex
+  let index: RAGIndexV2
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "索引不存在，请先运行 index 操作" }
   }
 
   const code = args.verifiedCode || ""
   const className = args.className
-
-  const chunk: KnowledgeChunk = {
+  const chunk = {
     id: `verified:${className}`,
-    type: "verified",
+    type: "verified" as const,
     content: code,
     metadata: {
       className,
@@ -401,11 +426,11 @@ async function addVerifiedCode(args: any, ctx: any, ragDir: string) {
     },
   }
 
-  const existingIndex = index.chunks.findIndex((c) => c.id === chunk.id)
-  if (existingIndex >= 0) {
-    index.chunks[existingIndex] = chunk
+  const existingIdx = index.hotChunks.verified.findIndex(c => c.id === chunk.id)
+  if (existingIdx >= 0) {
+    index.hotChunks.verified[existingIdx] = chunk
   } else {
-    index.chunks.push(chunk)
+    index.hotChunks.verified.push(chunk)
     index.stats.verifiedImplementations++
   }
 
@@ -423,21 +448,21 @@ async function addVerifiedCode(args: any, ctx: any, ragDir: string) {
 async function showStats(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
 
-  let index: RAGIndex
+  let index: RAGIndexV2
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "索引不存在，请先运行 index 操作" }
   }
 
-  const typeStats = index.chunks.reduce(
-    (acc, c) => {
-      acc[c.type] = (acc[c.type] || 0) + 1
-      return acc
-    },
-    {} as Record<string, number>,
-  )
+  const typeStats = {
+    class:    index.hotChunks.classes.length,
+    module:   index.hotChunks.modules.length,
+    verified: index.hotChunks.verified.length,
+    method:   index.coldChunks.methods.length,
+    ida:      index.coldChunks.ida.length,
+  }
 
   return {
     output: `📊 RAG 知识库统计
@@ -451,7 +476,7 @@ async function showStats(args: any, ctx: any, ragDir: string) {
 - 总方法数: ${index.stats.totalMethods}
 - IDA 分析数: ${index.stats.idaAnalyzed}
 - 已验证实现: ${index.stats.verifiedImplementations}
-
+${index.stats.compressionRatio ? `\n💾 压缩率: ${index.stats.compressionRatio}x (method chunks)` : ""}
 📦 Chunk 类型分布:
 ${Object.entries(typeStats)
   .map(([type, count]) => `- ${type}: ${count}`)
@@ -471,10 +496,10 @@ ${Object.entries(typeStats)
 async function semanticSearch(args: any, ctx: any, ragDir: string) {
   const indexPath = path.join(ragDir, "index.json")
 
-  let index: RAGIndex
+  let index: RAGIndexV2
   try {
-    const content = await fs.readFile(indexPath, "utf-8")
-    index = JSON.parse(content)
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
   } catch {
     return { error: "索引不存在，请先运行 index 操作" }
   }
@@ -482,19 +507,48 @@ async function semanticSearch(args: any, ctx: any, ragDir: string) {
   const query = args.query || ""
   const topK = args.topK || 10
 
-  // 简单的关键词匹配（后续可升级为向量搜索）
-  const results = index.chunks
-    .filter((c) => {
+  // 只搜索热数据（class + module + verified），method 是冷数据不展开
+  const searchable = [
+    ...index.hotChunks.classes,
+    ...index.hotChunks.modules,
+    ...index.hotChunks.verified,
+  ]
+
+  const results = searchable
+    .filter(c => {
       const searchText = (c.content + JSON.stringify(c.metadata)).toLowerCase()
-      return query.toLowerCase().split(" ").some((keyword) => searchText.includes(keyword))
+      return query.toLowerCase().split(" ").some(kw => searchText.includes(kw))
     })
     .slice(0, topK)
 
   return {
     output: `🔍 搜索结果 (找到 ${results.length} 条)
 
-${results.map((r, i) => `${i + 1}. [${r.type}] ${r.metadata.className || r.metadata.moduleName}`).join("\n")}`,
+${results.map((r: any, i: number) => `${i + 1}. [${r.type}] ${r.metadata.className || r.metadata.moduleName}`).join("\n")}`,
     results,
+  }
+}
+
+// ==================== 7. 分页列出类 ====================
+
+async function listClasses(args: any, ragDir: string) {
+  const indexPath = path.join(ragDir, "index.json")
+  let index: RAGIndexV2
+  try {
+    const raw = JSON.parse(await Bun.file(indexPath).text())
+    index = isV2(raw) ? raw : migrateV1toV2(raw)
+  } catch {
+    return { error: "索引不存在，请先运行 index 操作" }
+  }
+
+  const result = paginate(index.hotChunks.classes, {
+    offset: args.offset,
+    limit: args.limit,
+  })
+
+  return {
+    output: `📋 类列表 (第 ${result.pagination.currentPage}/${result.pagination.totalPages} 页，共 ${result.pagination.total} 个类)`,
+    ...result,
   }
 }
 
