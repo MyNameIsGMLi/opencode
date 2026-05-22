@@ -73,7 +73,9 @@ export default tool({
     }
 
     // ── Step 2: 定位 Unity 可执行文件 ─────────────────────────────
-    const unityPath = await findUnityExecutable(unityVersion, ctx)
+    // unityVersion 此时一定已赋值（上面的 return 确保了这一点）
+    const resolvedVersion = unityVersion as string
+    const unityPath = await findUnityExecutable(resolvedVersion, ctx)
     if (!unityPath) {
       // 列出已安装版本
       const installed = await listInstalledVersions(ctx)
@@ -134,7 +136,7 @@ export default tool({
       warnings,
       duration,
       logPath: logFile,
-      unityVersion: unityVersion!,
+      unityVersion: resolvedVersion,
       unityPath,
     }
 
