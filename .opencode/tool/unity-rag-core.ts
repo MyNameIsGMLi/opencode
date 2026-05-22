@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
+import { loadProjectConfig, resolveDumpCsPath, resolveScriptJsonPath } from "./unity-project-config"
 
 /**
  * Unity RAG Core - 渐进式知识库系统
@@ -133,8 +134,9 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
     }
   }
 
-  const dumpCsPath = args.dumpCsPath || path.join(args.projectDir, "Assets/Il2CppDump/dump.cs")
-  const scriptJsonPath = args.scriptJsonPath || path.join(args.projectDir, "Assets/Il2CppDump/script.json")
+  const config = await loadProjectConfig(args.projectDir)
+  const dumpCsPath = resolveDumpCsPath(args.projectDir, config, args.dumpCsPath)
+  const scriptJsonPath = resolveScriptJsonPath(args.projectDir, config, args.scriptJsonPath)
 
   // 读取文件
   let dumpContent: string
