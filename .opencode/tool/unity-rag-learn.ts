@@ -85,6 +85,10 @@ export default tool({
       patterns = extractPatterns(code)
     }
 
+    // 如果外部明确提供了 compileSuccess: true（来自 unity-editor-compile），
+    // 标记为"经 Unity 真实编译验证"
+    const verifiedByUnity = args.compileSuccess === true
+
     // 创建 verified chunk
     const verifiedChunk = {
       id: `verified:${args.className}`,
@@ -94,6 +98,7 @@ export default tool({
         className: args.className,
         ...metadata,
         verified: compileSuccess,
+        verifiedByUnity: args.compileSuccess === true,  // true = Unity 真实编译验证通过
         verifiedAt: new Date().toISOString(),
         patterns: patterns.map((p) => p.name),
         usedIDA: metadata.hasIDAComment,
@@ -114,7 +119,7 @@ export default tool({
     await Bun.write(indexPath, JSON.stringify(index, null, 2))
 
     return {
-      output: `✅ 已加入知识库: ${args.className}
+      output: `✅ 已加入知识库: ${args.className}${args.compileSuccess === true ? " (Unity 真实编译验证 ✓)" : ""}
 
 📊 代码分析:
 - 命名空间: ${metadata.namespace}

@@ -74,6 +74,37 @@ await tool("unity-impl-command", {
 - `--rebuild-cache`: 强制重建 RAG 索引
 - `--verbose`: 显示详细检索日志
 
+### 全自动模式参数
+
+- `--project-path <path>`: Unity 项目路径（提供后启用自动编译+修复，如 `/Users/ggm/UnPackAPP/arrows_unity_project`）
+- `--auto-compile`: 是否自动编译（默认 true，需配合 `--project-path` 使用）
+- `--max-iterations <n>`: 自动修复最大迭代次数（默认 5）
+
+### 全自动模式（推荐）
+
+```bash
+# 一键完成：Context 构建 → AI 生成 → Unity 编译 → 自动修复 → 知识库学习
+/impl-unity --class PlayerController --project-path /path/to/unity/project
+
+# 自动流程：
+# 1. RAG 检索 + IDA 分析（按需）→ 生成 AI Prompt
+# 2. AI 在当前对话生成代码
+# 3. 写入 Assets/Scripts/
+# 4. Unity -batchmode 编译
+# 5. 自动修复（最多 5 轮）
+# 6. 编译通过后自动加入知识库
+
+# 注意：第三方插件报错（DOTween、Zenject 等）需手动处理
+```
+
+### 新增工具（自动编译阶段）
+
+| 工具 | 说明 |
+|------|------|
+| `unity-editor-compile` | Unity headless 编译，版本自动检测 |
+| `unity-compile-fix` | 编译错误 Auto-Fix Loop（最多 5 轮） |
+| `unity-rag-community` | 社区检测（需 Python 3 + networkx） |
+
 ## 工作流程
 
 ### 首次使用（初始化）
