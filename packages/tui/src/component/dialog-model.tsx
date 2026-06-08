@@ -9,6 +9,16 @@ import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 
+type ModelCost = { input: number; output: number }
+
+function modelFooter(cost: ModelCost | undefined, providerID: string) {
+  if (!cost) return undefined
+  if (cost.input === 0 && providerID === "opencode") return "Free"
+  const input = cost.input === 0 ? "Free" : `$${cost.input.toFixed(2)}/M`
+  const output = `$${cost.output.toFixed(2)}/M`
+  return `${input} · ${output}`
+}
+
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
   const sync = useSync()
@@ -41,7 +51,7 @@ export function DialogModel(props: { providerID?: string }) {
             description: provider.name,
             category,
             disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            footer: modelFooter(model.cost, provider.id),
             onSelect: () => {
               onSelect(provider.id, model.id)
             },
@@ -79,7 +89,7 @@ export function DialogModel(props: { providerID?: string }) {
               : undefined,
             category: connected() ? provider.name : undefined,
             disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            footer: modelFooter(info.cost, provider.id),
             onSelect() {
               onSelect(provider.id, model)
             },

@@ -8,6 +8,13 @@ import { usePluginRuntime } from "../../plugin/runtime"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
+import { ModelCostDisplay } from "../../component/model-cost-display"
+import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+
+const moneyFormat = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+})
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const pluginRuntime = usePluginRuntime()
@@ -22,6 +29,36 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     return project.workspace.get(workspaceID)
   }
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+
+  const stats = createMemo(() => {
+    const s = sync.session.get(props.sessionID)
+    if (!s) return { tokens: 0, cost: 0, messages: 0 }
+
+    const parentID = s.parentID ?? s.id
+    const family = sync.data.session.filter((x) => x.id === parentID || x.parentID === parentID)
+
+    let totalTokens = 0
+    let totalCost = 0
+    let totalMessages = 0
+
+    for (const session of family) {
+      totalCost += session.cost ?? 0
+      const msgs = sync.data.message[session.id] ?? []
+      for (const m of msgs) {
+        if (m.role === "assistant") {
+          const msg = m as AssistantMessage
+          totalTokens +=
+            msg.tokens.input +
+            msg.tokens.output +
+            msg.tokens.reasoning +
+            msg.tokens.cache.read +
+            msg.tokens.cache.write
+          totalMessages++
+        }
+      }
+    }
+    return { tokens: totalTokens, cost: totalCost, messages: totalMessages }
+  })
 
   return (
     <Show when={session()}>
@@ -82,6 +119,26 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 </Show>
               </box>
             </pluginRuntime.Slot>
+
+            <box marginTop={1} marginBottom={1} gap={0}>
+              <text fg={theme.text}>
+                <b>对话总计</b>
+              </text>
+              <text fg={theme.textMuted}>
+                Tokens: <span style={{ fg: theme.text }}>{stats().tokens.toLocaleString()}</span>
+              </text>
+              <text fg={theme.textMuted}>
+                花费: <span style={{ fg: theme.success }}>{moneyFormat.format(stats().cost)}</span>
+              </text>
+              <text fg={theme.textMuted}>
+                消息: <span style={{ fg: theme.text }}>{stats().messages}</span> 条
+              </text>
+            </box>
+
+            <ModelCostDisplay sessionID={props.sessionID} />
+            <text fg={theme.border} marginTop={1} marginBottom={1}>
+              {"─".repeat(38)}
+            </text>
             <pluginRuntime.Slot name="sidebar_content" session_id={props.sessionID} />
           </box>
         </scrollbox>
