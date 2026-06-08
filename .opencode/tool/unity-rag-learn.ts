@@ -1,6 +1,11 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
 import { isV2, migrateV1toV2 } from "./unity-rag-cache"
+import assetRebinderTool from "./unity-asset-rebinder"
+
+async function callTool(toolDef: any, args: any, ctx: any) {
+  return toolDef.execute(args, ctx)
+}
 
 /**
  * Unity RAG 学习工具
@@ -118,8 +123,35 @@ export default tool({
     index.updatedAt = new Date().toISOString()
     await Bun.write(indexPath, JSON.stringify(index, null, 2))
 
+    // ── 增量重绑定：编译通过后自动更新该类的 .meta GUID ──────────────
+    let rebindResult: any = null
+    if (args.compileSuccess === true) {
+      try {
+        // 动态导入避免 tsc 扩展名限制（Bun 运行时支持无扩展名导入）
+        const configModule = await import("./unity-project-config")
+        const { loadProjectConfig, resolveSourceProjectPath } = configModule
+        const config = await loadProjectConfig(args.projectDir)
+        const sourceProject = resolveSourceProjectPath(config)
+        if (sourceProject) {
+          rebindResult = await callTool(assetRebinderTool, {
+            targetProjectPath: args.projectDir,
+            sourceProjectPath: sourceProject,
+            incrementalClassName: args.className,
+            rebindMetaOnly: true,
+            verbose: false,
+          }, ctx)
+        }
+      } catch {
+        // 增量重绑定失败不影响学习流程，静默处理
+      }
+    }
+
+    const rebindNote = rebindResult?.report?.scriptMetaUpdates?.length > 0
+      ? `\n🔗 已自动更新 .meta GUID（消除 Missing Script）`
+      : ""
+
     return {
-      output: `✅ 已加入知识库: ${args.className}${args.compileSuccess === true ? " (Unity 真实编译验证 ✓)" : ""}
+      output: `✅ 已加入知识库: ${args.className}${args.compileSuccess === true ? " (Unity 真实编译验证 ✓)" : ""}${rebindNote}
 
 📊 代码分析:
 - 命名空间: ${metadata.namespace}
@@ -133,6 +165,7 @@ ${patterns.length > 0 ? `🎯 检测到的模式:\n${patterns.map((p) => `- ${p.
 💡 此代码将用于后续类的参考。`,
       metadata,
       patterns,
+      rebindResult,
     }
   },
 })

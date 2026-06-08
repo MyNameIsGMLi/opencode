@@ -143,7 +143,7 @@ Output: ${args.outputDir}
 Manifest: ${manifestPath}
 
 Next steps:
-1. Run unity-reference-fixer to fix script and asset references
+1. Run unity-asset-rebinder to fix script references and copy assets
 2. Run unity-project-builder to create complete project
 3. Open in Unity Editor to verify scenes load correctly`,
       

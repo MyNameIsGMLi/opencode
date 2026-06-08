@@ -5,6 +5,7 @@ import { loadProjectConfig, resolveScriptJsonPath } from "./unity-project-config
 import {
   isV2, migrateV1toV2, decompressArray, compressArray,
 } from "./unity-rag-cache"
+import { judgeNeedsIDA, selectMethodsForIDA } from "./unity-rag-core"
 
 /**
  * Unity RAG IDA 集成
@@ -192,8 +193,10 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
           continue
         }
 
-        // 分析前 3 个方法（避免过长）
-        const methodsToAnalyze = classMethods.slice(0, 3)
+        // 按优先级智能选择方法（生命周期 > 业务逻辑关键词 > 参数复杂度）
+        const methodsToAnalyze = selectMethodsForIDA(classMethods).length > 0
+          ? selectMethodsForIDA(classMethods)
+          : classMethods.slice(0, 3)  // 兜底：若无高优先级方法取前3个
         const pseudocodeList: string[] = []
 
         for (const method of methodsToAnalyze) {
@@ -292,24 +295,4 @@ ${
   },
 })
 
-// ==================== 辅助函数 ====================
 
-// 注意：P1 阶段会将此函数提取为共享函数，目前先在此文件内对齐规则
-function judgeNeedsIDA(classChunk: any, allVerified: any[] = []): boolean {
-  const className = classChunk.metadata.className || ""
-  const fullName = classChunk.metadata.fullName || ""
-  const complexity = classChunk.metadata.complexity || 0
-  const methodCount = classChunk.metadata.methodCount || 0
-
-  const keywords = [
-    /Encrypt/i, /Decrypt/i, /Hash/i, /Compress/i,
-    /Network/i, /Protocol/i, /Serialize/i,
-    /Calculate.*Damage/i, /AI/i, /Pathfind/i, /Sync/i,
-  ]
-  if (keywords.some(k => k.test(className) || k.test(fullName))) return true
-  if (complexity > 80) return true
-  if (methodCount > 20) return true
-  // 规则4：同命名空间相似类已使用 IDA
-  const ns = classChunk.metadata.namespace
-  return allVerified.some((v: any) => v.metadata?.namespace === ns && v.metadata?.usedIDA === true)
-}

@@ -12,10 +12,10 @@ opencode run unity-dump \
   --metadataPath=./unpacked/assets/.../global-metadata.dat \
   --outputDir=./dump
 
-# 3. 提取资源
-opencode run unity-asset-extract \
+# 3. 资产导出 + GUID 重绑定
+opencode run unity-asset-rebinder \
   --inputPath=./unpacked \
-  --outputDir=./assets
+  --projectDir=./Project
 
 # 4. 初始化 RAG
 /impl-unity --init
@@ -32,30 +32,21 @@ opencode run unity-asset-extract \
 |------|------|------|
 | **unpack** | `unity-unpack` | 解包 APK/IPA |
 | **dump** | `unity-dump` | 生成 dump.cs |
-| **extract** | `unity-asset-extract` | 提取资源 ⭐ |
+| **rebinder** | `unity-asset-rebinder` | 资产导出+GUID重绑定+资源复制 ⭐ |
 | **impl** | `/impl-unity` | 实现代码（RAG） |
 | **scene** | `unity-scene-rebuilder` | 重建场景 |
-| **fix** | `unity-reference-fixer` | 修复引用 |
 | **build** | `unity-project-builder` | 构建项目 |
 
 ---
 
 ## 🎯 常用命令
 
-### 资源提取
+### 资产导出与绑定
 ```bash
-# 基础
-opencode run unity-asset-extract \
+# 一条命令完成：资产导出 + GUID 重绑定 + 资源复制
+opencode run unity-asset-rebinder \
   --inputPath=/path/to/unpacked \
-  --outputDir=/path/to/assets
-
-# 完整
-opencode run unity-asset-extract \
-  --inputPath=/path/to/unpacked \
-  --outputDir=/path/to/assets \
-  --includeScenes=true \
-  --includePrefabs=true \
-  --includeScriptableObjects=true
+  --projectDir=/path/to/Project
 ```
 
 ### RAG 代码生成
@@ -85,14 +76,6 @@ opencode run unity-scene-rebuilder \
   --extractedAssetsDir=/path/to/assets \
   --reversedCodeDir=/path/to/scripts \
   --outputDir=/path/to/scenes
-```
-
-### 引用修复
-```bash
-opencode run unity-reference-fixer \
-  --projectDir=/path/to/project \
-  --reversedCodeDir=/path/to/scripts \
-  --extractedAssetsDir=/path/to/assets
 ```
 
 ### 项目构建
@@ -126,15 +109,7 @@ opencode run unity-project-builder \
 │   ├── dump.cs
 │   └── script.json
 │
-├── assets/                   ← Step 3: extract
-│   ├── Assets/
-│   │   ├── Textures/
-│   │   ├── Models/
-│   │   ├── Scenes/
-│   │   └── Prefabs/
-│   └── ProjectSettings/
-│
-├── Project/                  ← Step 4-6: impl
+├── Project/                  ← Step 3-5: rebinder + impl
 │   ├── Assets/
 │   │   ├── Il2CppDump/
 │   │   │   ├── dump.cs
@@ -144,7 +119,7 @@ opencode run unity-project-builder \
 │       └── rag/
 │           └── index.json   ← RAG 知识库
 │
-└── Final/                    ← Step 7: build
+└── Final/                    ← Step 6: build
     ├── Assets/
     ├── ProjectSettings/
     └── Packages/
@@ -201,10 +176,9 @@ ls ~/UnPackTools/AssetRipper/AssetRipper.GUI.Free
 **分解**：
 - 解包：1-2 分钟
 - Dump：2-5 分钟
-- 资源提取：5-30 分钟
+- 资产重绑定：5-30 分钟
 - 代码实现：60-70% 的时间
 - 场景重建：5-10 分钟
-- 引用修复：3-5 分钟
 - 项目构建：2 分钟
 
 ---
@@ -240,8 +214,8 @@ open ~/UnPackTools/AssetRipper/AssetRipper.GUI.Free
 # 检查 Unity 版本
 # 确保与游戏版本一致
 
-# 重新修复引用
-opencode run unity-reference-fixer ...
+# 重新运行资产重绑定
+opencode run unity-asset-rebinder ...
 ```
 
 ---
@@ -276,11 +250,11 @@ opencode run unity-unpack --filePath=$APK --outputDir=$OUT_DIR/unpacked
 opencode run unity-dump --binaryPath=$OUT_DIR/unpacked/lib/*/libil2cpp.so \
   --metadataPath=$OUT_DIR/unpacked/assets/.../global-metadata.dat \
   --outputDir=$OUT_DIR/dump
-opencode run unity-asset-extract \
+opencode run unity-asset-rebinder \
   --inputPath=$OUT_DIR/unpacked \
-  --outputDir=$OUT_DIR/assets
+  --projectDir=$OUT_DIR/Project
 
-echo "✅ Automated extraction complete!"
+echo "Automated extraction complete!"
 ```
 
 ---
@@ -289,7 +263,7 @@ echo "✅ Automated extraction complete!"
 
 ```bash
 # 工具帮助
-opencode run unity-asset-extract --help
+opencode run unity-asset-rebinder --help
 /impl-unity --help
 
 # 查看文档
@@ -304,7 +278,7 @@ cat .opencode/docs/UNITY_RAG_QUICKSTART.md
 
 ## 🎯 下一步
 
-完成资源提取后：
+完成资产重绑定后：
 1. 📖 阅读 [完整指南](./UNITY_ASSET_TOOLS_GUIDE.md)
 2. 🚀 开始 [RAG 代码生成](./UNITY_RAG_QUICKSTART.md)
 3. 🏗️ 构建 [完整项目](./UNITY_RAG_GUIDE.md)
@@ -312,5 +286,5 @@ cat .opencode/docs/UNITY_RAG_QUICKSTART.md
 ---
 
 **快速参考**  
-版本: 2.0.0  
-更新: 2026-05-20
+版本: 2.1.0  
+更新: 2026-05-22

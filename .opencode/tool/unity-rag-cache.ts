@@ -7,25 +7,27 @@ import { deflateSync, inflateSync } from "zlib"
 //   - class/verified/module chunks 是检索热数据（约 5 MB）
 //
 // v2 策略：热/冷分离
-//   - hotChunks：未压缩，直接内存访问
-//   - coldChunks：Deflate level 1 压缩（6-8x 压缩比），按需解压
-
-export interface CompressedChunk {
-  id: string
-  type: string
-  compressed: string  // base64(deflate(JSON.stringify(chunk)))
-  originalSize: number
-}
+//   - hotChunks：未压缩，直接内存访问（class/module/verified）
+//   - coldChunks：整体批量压缩（Deflate level 1，7x 压缩比）
+//
+// 关键实测（arrows_unity_project，97K method chunks）：
+//   - 逐个压缩（方案 A）：1.2x，base64 开销抵消了压缩增益
+//   - 整体批量压缩（方案 B）：7.1x，31.6 MB → 4.5 MB ✅
+//   原因：大数组 JSON 文本重复度极高，统一压缩效率远优于逐个压缩
 
 export interface HotChunks {
-  classes: any[]    // type:"class"    检索热数据
-  modules: any[]    // type:"module"   模块摘要
+  classes:  any[]   // type:"class"    检索热数据
+  modules:  any[]   // type:"module"   模块摘要
   verified: any[]   // type:"verified" 已验证代码
 }
 
 export interface ColdChunks {
-  methods: CompressedChunk[]  // 97K+ 条，压缩存储
-  ida: CompressedChunk[]      // IDA 伪代码，按需解压
+  // 整体批量压缩：base64(deflate(JSON.stringify(chunk[])))
+  // 解压时一次性还原整个数组，然后按需访问
+  methodsBlob: string   // 97K+ method chunks，整体压缩
+  idaBlob: string       // IDA 伪代码，整体压缩（数量较少，按需解压）
+  methodCount: number   // 不解压即可获得数量
+  idaCount: number
 }
 
 export interface RAGIndexV2 {
@@ -43,28 +45,31 @@ export interface RAGIndexV2 {
   }
 }
 
-// ── 压缩 / 解压 ────────────────────────────────────────────────────────────
+// ── 压缩 / 解压（单个 chunk，供 IDA 动态添加使用）────────────────────────
 
-export function compressChunk(chunk: any): CompressedChunk {
+export function compressChunk(chunk: any): string {
+  // 返回 base64 编码的压缩字符串（单个 chunk 场景，IDA 用）
   const json = JSON.stringify(chunk)
-  const originalSize = Buffer.byteLength(json, "utf-8")
-  // level 1 = 最快速度，约 500 MB/s，压缩比 6-8x
-  const compressed = deflateSync(json, { level: 1 })
-  return {
-    id: chunk.id,
-    type: chunk.type,
-    compressed: compressed.toString("base64"),
-    originalSize,
-  }
+  return deflateSync(json, { level: 1 }).toString("base64")
 }
 
-export function decompressChunk(c: CompressedChunk): any {
-  const buf = Buffer.from(c.compressed, "base64")
+export function decompressChunk(compressed: string): any {
+  const buf = Buffer.from(compressed, "base64")
   return JSON.parse(inflateSync(buf).toString("utf-8"))
 }
 
-export function compressBatch(chunks: any[]): CompressedChunk[] {
-  return chunks.map(compressChunk)
+// ── 批量压缩（整体数组，7x 压缩比）──────────────────────────────────────
+
+export function compressArray(chunks: any[]): string {
+  if (chunks.length === 0) return ""
+  const json = JSON.stringify(chunks)
+  return deflateSync(json, { level: 1 }).toString("base64")
+}
+
+export function decompressArray(blob: string): any[] {
+  if (!blob) return []
+  const buf = Buffer.from(blob, "base64")
+  return JSON.parse(inflateSync(buf).toString("utf-8"))
 }
 
 // ── 版本检测 + 向后兼容迁移 ────────────────────────────────────────────────
@@ -86,15 +91,9 @@ export function migrateV1toV2(old: any): RAGIndexV2 {
   const methodChunks = old.chunks.filter((c: any) => c.type === "method")
   const idaChunks    = old.chunks.filter((c: any) => c.type === "ida")
 
-  const compressedMethods = compressBatch(methodChunks)
-  const originalBytes = methodChunks.reduce(
-    (sum: number, c: any) => sum + Buffer.byteLength(JSON.stringify(c), "utf-8"),
-    0,
-  )
-  const compressedBytes = compressedMethods.reduce(
-    (sum: number, c: CompressedChunk) => sum + Buffer.byteLength(c.compressed, "utf-8"),
-    0,
-  )
+  const originalBytes = Buffer.byteLength(JSON.stringify(methodChunks), "utf-8")
+  const methodsBlob   = compressArray(methodChunks)
+  const compressedBytes = Buffer.byteLength(methodsBlob, "utf-8")
 
   return {
     version: "2.0.0",
@@ -102,8 +101,10 @@ export function migrateV1toV2(old: any): RAGIndexV2 {
     updatedAt: new Date().toISOString(),
     hotChunks,
     coldChunks: {
-      methods: compressedMethods,
-      ida: compressBatch(idaChunks),
+      methodsBlob,
+      idaBlob: compressArray(idaChunks),
+      methodCount: methodChunks.length,
+      idaCount:    idaChunks.length,
     },
     stats: {
       ...(old.stats ?? {}),
@@ -123,8 +124,8 @@ export function flattenV2(index: RAGIndexV2): any[] {
     ...index.hotChunks.classes,
     ...index.hotChunks.modules,
     ...index.hotChunks.verified,
-    ...index.coldChunks.methods.map(decompressChunk),
-    ...index.coldChunks.ida.map(decompressChunk),
+    ...decompressArray(index.coldChunks.methodsBlob),
+    ...decompressArray(index.coldChunks.idaBlob),
   ]
 }
 

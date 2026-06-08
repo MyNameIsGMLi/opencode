@@ -3,7 +3,8 @@ import * as fs from "fs/promises"
 import * as path from "path"
 import { loadProjectConfig, resolveDumpCsPath, resolveScriptJsonPath } from "./unity-project-config"
 import {
-  compressBatch, compressChunk, decompressChunk, migrateV1toV2, isV2, paginate,
+  compressArray, compressChunk, decompressChunk, decompressArray,
+  migrateV1toV2, isV2, paginate,
   type RAGIndexV2, type HotChunks,
 } from "./unity-rag-cache"
 import { buildXrefsIndex, type ClassInfoLike } from "./unity-rag-xrefs"
@@ -223,13 +224,9 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
   }
   const methodChunks = chunks.filter(c => c.type === "method")
 
-  const compressedMethods = compressBatch(methodChunks)
-  const originalBytes = methodChunks.reduce(
-    (sum, c) => sum + Buffer.byteLength(JSON.stringify(c), "utf-8"), 0,
-  )
-  const compressedBytes = compressedMethods.reduce(
-    (sum, c) => sum + Buffer.byteLength(c.compressed, "utf-8"), 0,
-  )
+  const originalBytes = Buffer.byteLength(JSON.stringify(methodChunks), "utf-8")
+  const methodsBlob = compressArray(methodChunks)
+  const compressedBytes = Buffer.byteLength(methodsBlob, "utf-8")
   const compressionRatio =
     compressedBytes > 0 ? Math.round((originalBytes / compressedBytes) * 10) / 10 : 0
 
@@ -238,7 +235,7 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     hotChunks,
-    coldChunks: { methods: compressedMethods, ida: [] },
+    coldChunks: { methodsBlob, idaBlob: "", methodCount: methodChunks.length, idaCount: 0 },
     stats: {
       totalClasses: classes.length,
       totalMethods: methodChunks.length,
@@ -257,7 +254,7 @@ async function indexStatic(args: any, ctx: any, ragDir: string) {
 
   // ── 尝试运行社区检测（可选，需要 Python 3 + networkx）─────────────
   const commPath = path.join(ragDir, "communities.json")
-  const detectScript = path.join(args.projectDir, ".opencode", "scripts", "detect_communities.py")
+  const detectScript = path.join((import.meta as any).dir, "..", "scripts", "detect_communities.py")
   const scriptExists = await fs.access(detectScript).then(() => true).catch(() => false)
   if (scriptExists) {
     try {
@@ -330,13 +327,11 @@ async function retrieveContext(args: any, ctx: any, ragDir: string) {
     context.methods = []
   }
 
-  // Layer 2: IDA 分析
+  // Layer 2: IDA 分析（idaBlob 整体解压后按类名查找）
   if (layers.includes("ida")) {
-    const compressed = index.coldChunks.ida.find(c => c.id === `ida:${className}`)
-    const idaChunk = compressed ? decompressChunk(compressed) : undefined
-    if (idaChunk) {
-      context.ida = idaChunk
-    }
+    const idaChunks = decompressArray(index.coldChunks.idaBlob)
+    const idaChunk = idaChunks.find((c: any) => c.metadata?.className === className)
+    if (idaChunk) context.ida = idaChunk
   }
 
   // Layer 3: 已验证代码
@@ -393,15 +388,18 @@ async function addIdaAnalysis(args: any, ctx: any, ragDir: string) {
       fetchedAt: new Date().toISOString(),
     },
   }
-  const compressed = compressChunk(chunk)
 
-  const existingIdx = index.coldChunks.ida.findIndex(c => c.id === compressed.id)
+  // idaBlob 整体管理：解压 → 更新/追加 → 重新压缩
+  const idaChunks = decompressArray(index.coldChunks.idaBlob)
+  const existingIdx = idaChunks.findIndex((c: any) => c.id === chunk.id)
   if (existingIdx >= 0) {
-    index.coldChunks.ida[existingIdx] = compressed
+    idaChunks[existingIdx] = chunk
   } else {
-    index.coldChunks.ida.push(compressed)
+    idaChunks.push(chunk)
     index.stats.idaAnalyzed++
   }
+  index.coldChunks.idaBlob = compressArray(idaChunks)
+  index.coldChunks.idaCount = idaChunks.length
 
   index.updatedAt = new Date().toISOString()
   await fs.writeFile(indexPath, JSON.stringify(index, null, 2), "utf-8")
@@ -472,8 +470,8 @@ async function showStats(args: any, ctx: any, ragDir: string) {
     class:    index.hotChunks.classes.length,
     module:   index.hotChunks.modules.length,
     verified: index.hotChunks.verified.length,
-    method:   index.coldChunks.methods.length,
-    ida:      index.coldChunks.ida.length,
+    method:   index.coldChunks.methodCount,
+    ida:      index.coldChunks.idaCount,
   }
 
   return {
@@ -529,7 +527,7 @@ async function semanticSearch(args: any, ctx: any, ragDir: string) {
   const results = searchable
     .filter(c => {
       const searchText = (c.content + JSON.stringify(c.metadata)).toLowerCase()
-      return query.toLowerCase().split(" ").some(kw => searchText.includes(kw))
+      return query.toLowerCase().split(" ").some((kw: string) => searchText.includes(kw))
     })
     .slice(0, topK)
 
@@ -736,7 +734,7 @@ function detectModules(classes: ClassInfo[]): Map<string, ClassInfo[]> {
   const modules = new Map<string, ClassInfo[]>()
 
   for (const cls of classes) {
-    const moduleName = cls.namespace.split(".")[0] || "Root"
+    const moduleName = (cls.namespace || "").split(".")[0] || "Root"
     if (!modules.has(moduleName)) {
       modules.set(moduleName, [])
     }

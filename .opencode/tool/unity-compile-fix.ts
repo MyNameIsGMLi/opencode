@@ -1,5 +1,10 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
+import editorCompileTool from "./unity-editor-compile"
+
+async function callTool(toolDef: any, args: any, ctx: any) {
+  return toolDef.execute(args, ctx)
+}
 
 /**
  * Unity 编译错误自动修复循环（Auto-Fix Loop）
@@ -86,7 +91,7 @@ export default tool({
     const compileArgs: any = { projectPath: args.projectPath }
     if (args.unityVersion) compileArgs.unityVersion = args.unityVersion
 
-    const compileResult = await ctx.tool("unity-editor-compile", compileArgs)
+    const compileResult = await callTool(editorCompileTool, compileArgs, ctx)
 
     // 编译工具自身出错（如找不到 Unity）
     if (compileResult.error && !compileResult.errors) {

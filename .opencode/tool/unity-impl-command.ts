@@ -2,6 +2,15 @@ import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
 import * as fs from "fs/promises"
 import { loadProjectConfig, resolveDumpCsPath, resolveScriptJsonPath, resolveScriptsDir, detectProjectDir as detectProjectDirFromConfig } from "./unity-project-config"
+import ragWorkflowTool from "./unity-rag-workflow"
+import ragRetrieverTool from "./unity-rag-retriever"
+import ragIdaTool from "./unity-rag-ida"
+import ragAnalyzerTool from "./unity-rag-analyzer"
+
+// 直接调用其他工具（不依赖 ctx.tool，兼容所有执行环境）
+async function callTool(toolDef: any, args: any, ctx: any) {
+  return toolDef.execute(args, ctx)
+}
 
 /**
  * Unity impl-unity 命令处理器
@@ -22,6 +31,7 @@ export default tool({
 
   args: {
     class: tool.schema.string().optional().describe("要实现的类名"),
+    plan: tool.schema.boolean().optional().describe("只生成实现计划与设计书（/DO 工作流），暂不编写代码"),
     init: tool.schema.boolean().optional().describe("初始化 RAG 知识库"),
     progress: tool.schema.boolean().optional().describe("查看进度统计"),
     smartIda: tool.schema.boolean().optional().describe("智能批量获取 IDA"),
@@ -35,6 +45,9 @@ export default tool({
     projectDir: tool.schema.string().optional().describe("项目目录（自动检测）"),
     dumpDir: tool.schema.string().optional().describe("dump.cs 所在目录（覆盖默认 Assets/Il2CppDump）"),
     scriptDir: tool.schema.string().optional().describe("C# 脚本输出目录（覆盖默认 Assets/Scripts）"),
+    projectPath: tool.schema.string().optional().describe("Unity 项目路径（提供后自动编译修复，如 /path/to/unity/project）"),
+    autoCompile: tool.schema.boolean().optional().describe("是否自动编译（默认 true，需要提供 projectPath）"),
+    maxIterations: tool.schema.number().optional().describe("最大修复迭代次数（默认 5）"),
   },
 
   async execute(args, ctx) {
@@ -187,7 +200,7 @@ async function handleInit(args: any, ctx: any, projectDir: string) {
   console.log("🚀 正在初始化 RAG 知识库...")
 
   const config = await loadProjectConfig(projectDir)
-  const result = await ctx.tool("unity-rag-workflow", {
+  const result = await callTool(ragWorkflowTool, {
     workflow: "init",
     projectDir,
     verbose: args.verbose,
@@ -197,7 +210,7 @@ async function handleInit(args: any, ctx: any, projectDir: string) {
           scriptJsonPath: path.join(args.dumpDir, "script.json"),
         }
       : {}),
-  })
+  }, ctx)
 
   if (result.error) {
     return result
@@ -224,10 +237,10 @@ ${
 // ==================== 处理 --progress ====================
 
 async function handleProgress(args: any, ctx: any, projectDir: string) {
-  const result = await ctx.tool("unity-rag-workflow", {
+  const result = await callTool(ragWorkflowTool, {
     workflow: "status",
     projectDir,
-  })
+  }, ctx)
 
   return result
 }
@@ -237,11 +250,11 @@ async function handleProgress(args: any, ctx: any, projectDir: string) {
 async function handleSmartIda(args: any, ctx: any, projectDir: string) {
   console.log("🤖 正在智能判断需要 IDA 的类...")
 
-  const result = await ctx.tool("unity-rag-workflow", {
+  const result = await callTool(ragWorkflowTool, {
     workflow: "smart-ida",
     projectDir,
     verbose: args.verbose,
-  })
+  }, ctx)
 
   if (result.error) {
     return result
@@ -264,12 +277,12 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
   console.log(`🎯 正在检索 ${className} 的上下文...`)
 
   // Step 1: 智能检索
-  const retrieveResult = await ctx.tool("unity-rag-retriever", {
+  const retrieveResult = await callTool(ragRetrieverTool, {
     projectDir,
     className,
     forceIDA: args.forceIda,
     verbose: args.verbose,
-  })
+  }, ctx)
 
   if (retrieveResult.error) {
     return retrieveResult
@@ -280,11 +293,11 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
     console.log(`⚠️  ${className} 需要 IDA 分析但未缓存`)
     console.log(`正在获取 IDA 分析...`)
 
-    const idaResult = await ctx.tool("unity-rag-ida", {
+    const idaResult = await callTool(ragIdaTool, {
       mode: "single",
       projectDir,
       className,
-    })
+    }, ctx)
 
     if (idaResult.error) {
       console.log(`⚠️  IDA 获取失败: ${idaResult.error}`)
@@ -293,11 +306,11 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
       console.log(`✅ IDA 分析已获取并缓存`)
 
       // 重新检索（包含新的 IDA）
-      const newRetrieveResult = await ctx.tool("unity-rag-retriever", {
+      const newRetrieveResult = await callTool(ragRetrieverTool, {
         projectDir,
         className,
         verbose: false,
-      })
+      }, ctx)
 
       if (!newRetrieveResult.error) {
         retrieveResult.context = newRetrieveResult.context
@@ -308,11 +321,11 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
 
   // 自动增量分析（更新图表和玩法文档）
   try {
-    await ctx.tool("unity-rag-analyzer", {
+    await callTool(ragAnalyzerTool, {
       projectDir,
       mode: "incremental",
       className,
-    })
+    }, ctx)
   } catch {
     // 分析失败不影响主流程
   }
@@ -322,27 +335,54 @@ async function handleImplementClass(args: any, ctx: any, projectDir: string) {
   const scriptsDir = resolveScriptsDir(projectDir, config, args.scriptDir)
   const outputPath = path.join(scriptsDir, `${className}.cs`)
 
+  let compileInstruction = ""
+  if (args.plan) {
+    compileInstruction = [
+      ``,
+      `## 🌟 计划优先模式激活（AI 请执行）`,
+      ``,
+      `**任务**：请勿直接开始编写代码！您必须先对该类进行深度方案设计。`,
+      ``,
+      `请按以下结构为用户输出一份详细的《${className} 状态机与物理细节实现计划书》：`,
+      `1. **现状与结构分析**：该类在原版 dump.cs 中的角色、继承关系、所需状态字段。`,
+      `2. **核心状态与流程图**：描述该类的完整状态流转。`,
+      `3. **详细实现步骤**：分步列出需要修改或实现的文件、接口（如 \`IDamageable\`）、本地依赖等。`,
+      `4. **风险点与死锁预防**：指出类似空中拦截、NullReference、全局暂停状态等可能的问题。`,
+      ``,
+      `请以优雅的 Markdown 格式输出计划书。输出完毕后**停止**，等待用户确认“执行”后再进行代码写入和编译。`,
+    ].join("\n")
+  } else {
+    compileInstruction = args.projectPath && args.autoCompile !== false
+      ? [
+          ``,
+          `## 全自动模式指令（AI 请执行）`,
+          ``,
+          `**步骤 1**：将生成的代码写入：\`${outputPath}\``,
+          ``,
+          `**步骤 2**：调用 unity-compile-fix 启动自动编译修复循环：`,
+          `- projectPath: "${args.projectPath}"`,
+          `- className: "${args.class}"`,
+          `- iteration: 0`,
+          `- maxIterations: ${args.maxIterations ?? 5}`,
+          ``,
+          `**步骤 3**：根据结果循环处理，成功后调用 unity-rag-learn 保存代码。`,
+        ].join("\n")
+      : `\n💡 提示：添加 --project-path 参数可启用自动编译功能。`
+  }
+
   return {
-    output: `${retrieveResult.output}
+    output: `✅ Context 准备完成: ${args.class}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 优化的 AI Prompt（复制下面内容发给 AI）
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${retrieveResult.output}
+${compileInstruction}
 
-${retrieveResult.prompt}
+---
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💡 下一步:
-1. 复制上面的 Prompt 发给 AI（Claude/GPT）
-2. 保存生成的代码到: ${outputPath}
-3. 编译验证
-4. 成功后自动学习（下次会参考此代码）
-
-提示: 可以直接在 OpenCode 中继续对话让 AI 生成代码`,
-    prompt: retrieveResult.prompt,
+${retrieveResult.prompt}`,
     context: retrieveResult.context,
+    prompt: retrieveResult.prompt,
     outputPath,
+    needsIDAFetch: retrieveResult.needsIDAFetch,
   }
 }
 
@@ -351,11 +391,11 @@ ${retrieveResult.prompt}
 async function handleAnalyze(args: any, ctx: any, projectDir: string) {
   console.log("🔍 正在全量分析，生成 UML/架构图/核心玩法方案...")
 
-  const result = await ctx.tool("unity-rag-analyzer", {
+  const result = await callTool(ragAnalyzerTool, {
     projectDir,
     mode: "full",
     verbose: args.verbose,
-  })
+  }, ctx)
 
   if (result.error) return result
 

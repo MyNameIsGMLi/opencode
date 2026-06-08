@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
-import { migrateV1toV2, isV2, decompressChunk } from "./unity-rag-cache"
+import { migrateV1toV2, isV2, decompressArray } from "./unity-rag-cache"
+import { judgeNeedsIDA as judgeNeedsIDAfromCore } from "./unity-rag-core"
 import {
   getUsedBy, getPriorityLabel, detectPatternsFromXrefs, type XrefsIndex,
 } from "./unity-rag-xrefs"
@@ -83,7 +84,7 @@ export default tool({
     // ==================== 阶段 2: 智能判断是否需要 IDA ====================
     log(`[2/6] 智能判断是否需要 IDA`)
 
-    const needsIDA = args.forceIDA || judgeNeedsIDA(targetChunk, allVerified)
+    const needsIDA = args.forceIDA || judgeNeedsIDAfromCore(targetChunk, allVerified)
     log(`✓ 判断结果: ${needsIDA ? "需要 IDA" : "不需要 IDA"}`)
 
     // ==================== 阶段 3: 检索依赖类 ====================
@@ -125,9 +126,9 @@ export default tool({
 
     if (needsIDA) {
       log(`[5/6] 检索 IDA 分析`)
-      const coldIda = index.coldChunks?.ida ?? []
-      const compressed = coldIda.find((c: any) => c.id === `ida:${args.className}`)
-      idaData = compressed ? decompressChunk(compressed) : null
+      // IDA 是 blob，整体解压后按类名查找
+      const idaChunks = decompressArray(index.coldChunks?.idaBlob ?? "")
+      idaData = idaChunks.find((c: any) => c.metadata?.className === args.className) ?? null
 
       if (idaData) log(`✓ 找到已缓存的 IDA 分析`)
       else log(`⚠ 未找到 IDA 分析，需要按需获取`)
@@ -203,36 +204,6 @@ export default tool({
   },
 })
 
-// ==================== 智能判断逻辑 ====================
-
-function judgeNeedsIDA(targetChunk: any, allVerified: any[]): boolean {
-  const className = targetChunk.metadata.className || ""
-  const fullName  = targetChunk.metadata.fullName  || ""
-  const complexity   = targetChunk.metadata.complexity  || 0
-  const methodCount  = targetChunk.metadata.methodCount || 0
-
-  // 规则 1: 高风险关键词
-  const highRiskKeywords = [
-    /Encrypt/i, /Decrypt/i, /Hash/i, /Compress/i,
-    /Network/i, /Protocol/i, /Serialize/i,
-    /Calculate.*Damage/i, /AI.*Decision/i, /Pathfind/i, /Sync/i,
-  ]
-  for (const pattern of highRiskKeywords)
-    if (pattern.test(className) || pattern.test(fullName)) return true
-
-  // 规则 2: 复杂度
-  if (complexity > 80) return true
-
-  // 规则 3: 方法数量
-  if (methodCount > 20) return true
-
-  // 规则 4: 同命名空间相似类使用了 IDA
-  const namespace = targetChunk.metadata.namespace
-  return allVerified.some(
-    c => c.metadata.namespace === namespace && c.metadata.usedIDA === true,
-  )
-}
-
 // ==================== 模式检测（基于类结构）====================
 
 function detectPatterns(
@@ -278,113 +249,157 @@ function detectPatterns(
   return patterns
 }
 
-// ==================== Prompt 生成 ====================
+// ==================== Token 预算管理 ====================
+
+const CHAR_BUDGET = 400_000 // ≈ 100K tokens (1 token ≈ 4 chars)
+
+function estimateChars(s: string): number {
+  return s.length
+}
+
+// ==================== Prompt 生成（带 Token 预算） ====================
 
 function generatePrompt(context: any): string {
   const { targetClass, dependencies, similarVerified, idaData, patterns, xrefsContext } = context
+  const allPatterns = [...patterns, ...(xrefsContext?.xrefPatterns ?? [])]
 
-  const allPatterns = [
-    ...patterns,
-    ...(xrefsContext?.xrefPatterns ?? []),
-  ]
+  let used = 0
+  const sections: string[] = []
 
-  let prompt = `# 任务：重建 Unity C# 类
-
-## 目标类
-\`\`\`csharp
-${targetClass.content}
-\`\`\`
-
-**完整路径**: ${targetClass.metadata.fullName}
-**命名空间**: ${targetClass.metadata.namespace}
-**字段数**: ${targetClass.metadata.fieldCount}
-**方法数**: ${targetClass.metadata.methodCount}
-**复杂度**: ${targetClass.metadata.complexity}
-${xrefsContext ? `**优先级**: ${xrefsContext.priority}` : ""}
-
-`
-
-  // ── Xrefs 使用示例（帮助 AI 推断方法契约）────────────────────────
-  if (xrefsContext?.usedBy.length) {
-    prompt += `## 引用关系（其他类如何使用本类）
-
-> 以下信息揭示了本类的实际使用场景，帮助推断方法的预期行为。
-
-`
-    for (const u of xrefsContext.usedBy) {
-      const callerShort = u.fromClass.split(".").pop()
-      const rel = u.type === "inheritance"
-        ? `继承了本类`
-        : u.type === "interface"
-        ? `实现了本类接口`
-        : u.type === "fieldType"
-        ? `持有本类作为字段 (${u.detail ?? ""})`
-        : u.type === "methodParam"
-        ? `将本类作为方法参数 (${u.detail ?? ""})`
-        : `方法返回本类 (${u.detail ?? ""})`
-      prompt += `- \`${callerShort}\` ${rel}\n`
-    }
-    prompt += "\n"
+  const push = (s: string) => {
+    used += estimateChars(s)
+    sections.push(s)
   }
 
-  // ── 依赖类参考 ───────────────────────────────────────────────────
-  if (dependencies.length > 0) {
-    prompt += `## 依赖类参考\n\n`
-    for (const dep of dependencies.slice(0, 3)) {
-      if (dep.type === "verified") {
-        prompt += `### ${dep.metadata.className} (已验证实现)\n\`\`\`csharp\n${dep.content.slice(0, 500)}\n...\n\`\`\`\n\n`
-      } else {
-        prompt += `### ${dep.metadata.className || dep.metadata.fullName}\n\`\`\`csharp\n${dep.content}\n\`\`\`\n\n`
-      }
-    }
-  }
+  // ── 必须保留：目标类 + 基本信息 ─────────────────────────────────
+  const header = [
+    `# 任务：重建 Unity C# 类`,
+    ``,
+    `## 目标类`,
+    `\`\`\`csharp`,
+    targetClass.content,
+    `\`\`\``,
+    ``,
+    `**完整路径**: ${targetClass.metadata.fullName}`,
+    `**命名空间**: ${targetClass.metadata.namespace}`,
+    `**字段数**: ${targetClass.metadata.fieldCount}`,
+    `**方法数**: ${targetClass.metadata.methodCount}`,
+    `**复杂度**: ${targetClass.metadata.complexity}`,
+    xrefsContext ? `**优先级**: ${xrefsContext.priority}` : "",
+    ``,
+  ].filter(Boolean).join("\n")
+  push(header)
 
-  // ── 相似已验证类 ─────────────────────────────────────────────────
-  if (similarVerified.length > 0) {
-    prompt += `## 相似的已验证实现（参考）\n\n`
-    for (const similar of similarVerified) {
-      prompt += `### ${similar.metadata.className}\n`
-      prompt += `命名空间: ${similar.metadata.namespace}\n`
-      prompt += `\`\`\`csharp\n${similar.content.slice(0, 800)}\n...\n\`\`\`\n\n`
-    }
-  }
-
-  // ── IDA 伪代码 ───────────────────────────────────────────────────
+  // ── IDA 伪代码（完整保留，最重要）──────────────────────────────
   if (idaData) {
-    prompt += `## IDA Pro 伪代码（真实逻辑）\n\n`
-    prompt += `**重要**: 以下是从二进制反编译的真实代码逻辑，请严格参考实现。\n\n`
-    prompt += `\`\`\`c\n${idaData.content.slice(0, 2000)}\n\`\`\`\n\n`
+    const idaSection = [
+      `## IDA Pro 伪代码（真实逻辑）`,
+      ``,
+      `**重要**: 以下是从二进制反编译的真实代码逻辑，请严格参考实现。`,
+      ``,
+      `\`\`\`c`,
+      idaData.content.slice(0, 8000),  // IDA 伪代码上限 8000 字符
+      `\`\`\``,
+      ``,
+    ].join("\n")
+    push(idaSection)
   }
 
-  // ── 设计模式（结构 + Xrefs 推断合并）────────────────────────────
-  if (allPatterns.length > 0) {
-    prompt += `## 检测到的设计模式\n\n`
-    for (const pattern of allPatterns) {
-      prompt += `### ${pattern.name}\n${pattern.description}\n证据: ${pattern.evidence}\n\n`
+  // ── Xrefs 使用示例（最多 5 条，帮助 AI 推断方法契约）───────────
+  if (xrefsContext?.usedBy?.length && used < CHAR_BUDGET) {
+    const xrefsSection = [
+      `## 引用关系（其他类如何使用本类）`,
+      ``,
+      `> 以下信息揭示了本类的实际使用场景，帮助推断方法的预期行为。`,
+      ``,
+      ...xrefsContext.usedBy.slice(0, 5).map((u: any) => {
+        const callerShort = (u.fromClass || "").split(".").pop() || u.fromClass || "?"
+        const rel = u.type === "inheritance" ? `继承了本类`
+          : u.type === "interface" ? `实现了本类接口`
+          : u.type === "fieldType" ? `持有本类作为字段 (${u.detail ?? ""})`
+          : u.type === "methodParam" ? `将本类作为方法参数 (${u.detail ?? ""})`
+          : `方法返回本类 (${u.detail ?? ""})`
+        return `- \`${callerShort}\` ${rel}`
+      }),
+      ``,
+    ].join("\n")
+    if (used + estimateChars(xrefsSection) < CHAR_BUDGET) push(xrefsSection)
+  }
+
+  // ── 相似已验证代码（每个 2000 字符上限，最多 3 个）─────────────
+  if (similarVerified?.length && used < CHAR_BUDGET) {
+    const verifiedHeader = `## 相似的已验证实现（参考）\n\n`
+    push(verifiedHeader)
+    for (const similar of similarVerified.slice(0, 3)) {
+      const s = [
+        `### ${similar.metadata.className}`,
+        `命名空间: ${similar.metadata.namespace}`,
+        `\`\`\`csharp`,
+        similar.content.slice(0, 2000),
+        similar.content.length > 2000 ? `// ...（已截断）` : "",
+        `\`\`\``,
+        ``,
+      ].filter(Boolean).join("\n")
+      if (used + estimateChars(s) < CHAR_BUDGET) push(s)
     }
   }
 
-  // ── 实现要求 ─────────────────────────────────────────────────────
-  prompt += `## 实现要求
+  // ── 依赖类参考（每个 800 字符上限，最多 3 个）──────────────────
+  if (dependencies?.length && used < CHAR_BUDGET) {
+    const depsHeader = `## 依赖类参考\n\n`
+    push(depsHeader)
+    for (const dep of dependencies.slice(0, 3)) {
+      const content = dep.type === "verified"
+        ? dep.content.slice(0, 800)
+        : dep.content
+      const s = [
+        `### ${dep.metadata.className || dep.metadata.fullName}${dep.type === "verified" ? " (已验证实现)" : ""}`,
+        `\`\`\`csharp`,
+        content,
+        content.length === 800 ? `// ...` : "",
+        `\`\`\``,
+        ``,
+      ].filter(Boolean).join("\n")
+      if (used + estimateChars(s) < CHAR_BUDGET) push(s)
+    }
+  }
 
-1. **零 TODO/Stub**: 所有方法必须有完整实现，不允许空方法或 TODO 注释
-2. **命名一致**: 字段名、方法名必须与 dump.cs 完全一致
-3. **Unity 生命周期**: 如果继承 MonoBehaviour，正确实现 Awake/Start/Update 等
-4. **设计模式**: 遵循检测到的设计模式实现
-${idaData ? "5. **IDA 逻辑优先**: 有 IDA 伪代码的方法，必须按伪代码逻辑实现\n" : ""}
-${xrefsContext?.usedBy.length ? "6. **引用契约**: 参考"引用关系"中的使用示例，确保公共方法的签名和行为符合调用方预期\n" : ""}
+  // ── 设计模式（结构检测 + Xrefs 推断合并）───────────────────────
+  if (allPatterns.length > 0 && used < CHAR_BUDGET) {
+    const patternSection = [
+      `## 检测到的设计模式`,
+      ``,
+      ...allPatterns.map(p => `### ${p.name}\n${p.description}\n证据: ${p.evidence}`),
+      ``,
+    ].join("\n")
+    if (used + estimateChars(patternSection) < CHAR_BUDGET) push(patternSection)
+  }
 
-## 输出格式
+  // ── 实现要求（必须保留）────────────────────────────────────────
+  const requirements = [
+    `## 实现要求`,
+    ``,
+    `1. **零 TODO/Stub**: 所有方法必须有完整实现，不允许空方法或 TODO 注释`,
+    `2. **命名一致**: 字段名、方法名必须与 dump.cs 完全一致`,
+    `3. **Unity 生命周期**: 如果继承 MonoBehaviour，正确实现 Awake/Start/Update 等`,
+    `4. **设计模式**: 遵循检测到的设计模式实现`,
+    idaData ? `5. **IDA 逻辑优先**: 有 IDA 伪代码的方法，必须按伪代码逻辑实现` : "",
+    xrefsContext?.usedBy?.length
+      ? `6. **引用契约**: 参考[引用关系]中的使用示例，确保公共方法的签名和行为符合调用方预期`
+      : "",
+    ``,
+    `## 输出格式`,
+    ``,
+    `直接输出完整的 C# 代码，包含：`,
+    `- 正确的命名空间`,
+    `- 所有 using 引用`,
+    `- 完整的类实现`,
+    `- 所有字段初始化`,
+    `- 所有方法的完整逻辑`,
+    ``,
+    `开始生成：`,
+  ].filter(Boolean).join("\n")
+  sections.push(requirements)
 
-直接输出完整的 C# 代码，包含：
-- 正确的命名空间
-- 所有 using 引用
-- 完整的类实现
-- 所有字段初始化
-- 所有方法的完整逻辑
-
-开始生成：
-`
-
-  return prompt
+  return sections.join("\n")
 }

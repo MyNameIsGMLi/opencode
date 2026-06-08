@@ -1,0 +1,54 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  "small_model": "anthropic/claude-sonnet-4-5",
+  "provider": {
+    "anthropic": {
+      "options": {
+        "apiKey": "{file:/Users/ggm/.config/opencode/.anthropic-key}"
+      }
+    },
+    "google": {},
+    "xai": {
+      "options": {
+        "baseURL": "https://api.x.ai/v1",
+        "apiKey": "{file:/Users/ggm/.config/opencode/.xai-key}"
+      },
+      "models": {
+        "grok-4": {
+          "name": "Grok 4"
+        },
+        "grok-4-fast": {
+          "name": "Grok 4 Fast"
+        },
+        "grok-3": {
+          "name": "Grok 3"
+        },
+        "grok-3-fast": {
+          "name": "Grok 3 Fast"
+        },
+        "grok-3-mini": {
+          "name": "Grok 3 Mini"
+        },
+        "grok-2": {
+          "name": "Grok 2"
+        },
+        "grok-code-fast-1": {
+          "name": "Grok Code Fast"
+        }
+      }
+    }
+  },
+  "permission": {
+    "websearch": "deny",
+    "codesearch": "deny",
+    "grok-websearch": "allow",
+    "notebooklm": "allow"
+  },
+  "instructions": [
+    "When you need to search the web, retrieve current information, look up documentation, or find recent news, you MUST use the `grok-websearch` tool. Do NOT use `websearch` or `webfetch` for general search purposes.",
+    "STRICT RULE — research-workflow skill: ONLY invoke the research-workflow skill when the user's message starts with the exact Chinese prefix '深度调研：' or '全面研究：'. Verify this with: message.trim().startsWith('深度调研：') || message.trim().startsWith('全面研究：'). If this check fails, do NOT use research-workflow. For other research requests use grok-websearch directly.",
+    "Available custom skills: 'research-workflow' (deep research with NotebookLM, trigger: '深度调研：' or '全面研究：' prefix), 'plan-execution' (execute TodoWrite plans via superpowers), 'context-collect-and-plan' (triggered by /DO command: Stage 1 uses Gemini Flash subagent for parallel context collection, Stage 2 uses Claude Sonnet for analysis and plan generation — always load this skill when /DO is invoked). Available superpowers skills under ~/.config/opencode/skills/superpowers/skills/.",
+    "MANDATORY MODEL ROUTING FOR UNITY REVERSE ENGINEERING: When performing Unity reverse engineering work, you MUST delegate to the correct subagent based on task type. This rule applies in ALL situations, no exceptions: (1) EXECUTION tasks → delegate to @reverse-execute (uses Grok): analyzing decompiled code, extracting from dump.cs/script.json, writing reversed C# code, running Roslyn validation, fixing compilation errors, creating stub classes, ANY work that uses existing tools or follows the established reverse engineering workflow. (2) TOOL CREATION tasks → delegate to @reverse-toolmaker (uses Claude Opus 4.6): writing NEW Python scripts, improving converters, building analyzers, creating automation utilities, extending Unity stubs, ANY work that creates or modifies tools in the reverse engineering pipeline. When in doubt: if you are USING a tool → @reverse-execute; if you are MAKING a tool → @reverse-toolmaker. This routing is non-negotiable and applies globally. IMPORTANT WHEN DELEGATING CLASS REVERSAL: When asking @reverse-execute to reverse engineer a class, your prompt MUST include: (a) the class name, (b) remind it to check decompiled/ClassName.json for method implementations and translate the C pseudocode to real C# logic, (c) remind it that methods must have real implementations not just NotImplementedException stubs — stubs are only acceptable when no decompiled code exists AND the logic cannot be deduced."
+  ]
+}

@@ -3,6 +3,13 @@ import * as fs from "fs/promises"
 import * as path from "path"
 import { isV2, migrateV1toV2 } from "./unity-rag-cache"
 import { loadProjectConfig, resolveScriptsDir } from "./unity-project-config"
+import ragCoreTool from "./unity-rag-core"
+import ragIdaTool from "./unity-rag-ida"
+import ragRetrieverTool from "./unity-rag-retriever"
+
+async function callTool(toolDef: any, args: any, ctx: any) {
+  return toolDef.execute(args, ctx)
+}
 
 /**
  * Unity RAG 完整工作流
@@ -25,7 +32,7 @@ export default tool({
 - smart-ida: 智能批量获取 IDA`,
 
   args: {
-    workflow: tool.schema.enum(["init", "implement", "batch", "smart-ida", "status"]).describe("工作流类型"),
+    workflow: tool.schema.enum(["init", "implement", "batch", "smart-ida", "status", "auto-implement"]).describe("工作流类型"),
 
     projectDir: tool.schema.string().describe("Unity 项目根目录"),
 
@@ -38,6 +45,9 @@ export default tool({
     autoLearn: tool.schema.boolean().optional().describe("自动学习成功的实现（默认 true）"),
 
     verbose: tool.schema.boolean().optional().describe("显示详细日志"),
+
+    dumpCsPath: tool.schema.string().optional().describe("dump.cs 路径"),
+    scriptJsonPath: tool.schema.string().optional().describe("script.json 路径"),
   },
 
   async execute(args, ctx) {
@@ -58,6 +68,9 @@ export default tool({
 
       case "status":
         return await statusWorkflow(args, ctx, ragDir)
+
+      case "auto-implement":
+        return await autoImplementWorkflow(args, ctx, ragDir)
 
       default:
         return { error: `Unknown workflow: ${args.workflow}` }
@@ -80,11 +93,13 @@ async function initWorkflow(args: any, ctx: any, ragDir: string) {
   // Step 2: 调用 unity-rag-core 索引
   log("[1/3] 索引静态知识（dump.cs + script.json）...")
 
-  const indexResult = await ctx.tool("unity-rag-core", {
+  const indexResult = await callTool(ragCoreTool, {
     action: "index",
     projectDir: args.projectDir,
     force: true,
-  })
+    dumpCsPath: args.dumpCsPath,
+    scriptJsonPath: args.scriptJsonPath,
+  }, ctx)
 
   if (indexResult.error) {
     return { error: `索引失败: ${indexResult.error}` }
@@ -95,11 +110,11 @@ async function initWorkflow(args: any, ctx: any, ragDir: string) {
   // Step 3: 智能判断需要 IDA 的类
   log("[2/3] 智能判断需要 IDA 分析的类...")
 
-  const idaPlanResult = await ctx.tool("unity-rag-ida", {
+  const idaPlanResult = await callTool(ragIdaTool, {
     mode: "smart",
     projectDir: args.projectDir,
     dryRun: true,
-  })
+  }, ctx)
 
   const needsIdaCount = idaPlanResult.targetClasses?.length || 0
 
@@ -147,11 +162,11 @@ async function implementWorkflow(args: any, ctx: any, ragDir: string) {
   // Step 1: 智能检索上下文
   log("[1/4] 智能检索相关上下文...")
 
-  const retrieveResult = await ctx.tool("unity-rag-retriever", {
+  const retrieveResult = await callTool(ragRetrieverTool, {
     projectDir: args.projectDir,
     className: args.className,
     verbose: args.verbose,
-  })
+  }, ctx)
 
   if (retrieveResult.error) {
     return { error: retrieveResult.error }
@@ -163,12 +178,12 @@ async function implementWorkflow(args: any, ctx: any, ragDir: string) {
   if (retrieveResult.needsIDAFetch) {
     log("[2/4] 需要 IDA 分析，正在获取...")
 
-    const idaResult = await ctx.tool("unity-rag-ida", {
+    const idaResult = await callTool(ragIdaTool, {
       mode: "single",
       projectDir: args.projectDir,
       className: args.className,
       idaRpcUrl: args.idaRpcUrl,
-    })
+    }, ctx)
 
     if (idaResult.error) {
       log(`⚠ IDA 获取失败: ${idaResult.error}`)
@@ -177,10 +192,10 @@ async function implementWorkflow(args: any, ctx: any, ragDir: string) {
       log(`✓ IDA 分析已获取并缓存`)
 
       // 重新检索（包含新的 IDA 数据）
-      const newRetrieveResult = await ctx.tool("unity-rag-retriever", {
+      const newRetrieveResult = await callTool(ragRetrieverTool, {
         projectDir: args.projectDir,
         className: args.className,
-      })
+      }, ctx)
 
       if (!newRetrieveResult.error) {
         retrieveResult.context = newRetrieveResult.context
@@ -256,12 +271,12 @@ async function batchWorkflow(args: any, ctx: any, ragDir: string) {
   // Step 2: 批量获取 IDA（如果需要）
   log("[1/2] 批量获取 IDA 分析...")
 
-  const idaResult = await ctx.tool("unity-rag-ida", {
+  const idaResult = await callTool(ragIdaTool, {
     mode: "batch",
     projectDir: args.projectDir,
     moduleName: args.moduleName,
     idaRpcUrl: args.idaRpcUrl,
-  })
+  }, ctx)
 
   if (idaResult.error) {
     log(`⚠ IDA 批量获取失败: ${idaResult.error}`)
@@ -300,11 +315,11 @@ async function smartIdaWorkflow(args: any, ctx: any, ragDir: string) {
 
   log("🤖 开始智能 IDA 批量分析...")
 
-  const idaResult = await ctx.tool("unity-rag-ida", {
+  const idaResult = await callTool(ragIdaTool, {
     mode: "smart",
     projectDir: args.projectDir,
     idaRpcUrl: args.idaRpcUrl,
-  })
+  }, ctx)
 
   if (idaResult.error) {
     return { error: idaResult.error }
@@ -319,10 +334,10 @@ async function smartIdaWorkflow(args: any, ctx: any, ragDir: string) {
 // ==================== 状态工作流 ====================
 
 async function statusWorkflow(args: any, ctx: any, ragDir: string) {
-  const statsResult = await ctx.tool("unity-rag-core", {
+  const statsResult = await callTool(ragCoreTool, {
     action: "stats",
     projectDir: args.projectDir,
-  })
+  }, ctx)
 
   if (statsResult.error) {
     return { error: statsResult.error }
@@ -369,5 +384,109 @@ ${verifiedClasses > 100 ? "- 知识库已积累足够案例，后续生成准确
       remaining: remainingClasses,
       estimatedHours,
     },
+  }
+}
+
+// ==================== 全自动实现工作流 ====================
+
+async function autoImplementWorkflow(args: any, ctx: any, ragDir: string) {
+  if (!args.className) {
+    return { error: "auto-implement 工作流需要 --className 参数" }
+  }
+
+  const log = (msg: string) => {
+    if (args.verbose) console.log(msg)
+  }
+
+  log(`🤖 全自动实现: ${args.className}`)
+
+  // Step 1: Context 构建（智能检索）
+  log("[1/3] 检索 Context...")
+  let retrieveResult = await callTool(ragRetrieverTool, {
+    projectDir: args.projectDir,
+    className: args.className,
+    verbose: args.verbose,
+  }, ctx)
+
+  if (retrieveResult.error) {
+    return { error: retrieveResult.error }
+  }
+
+  // Step 2: IDA 获取（如需要）
+  if (retrieveResult.needsIDAFetch) {
+    log("[2/3] 需要 IDA，正在获取...")
+    const idaResult = await callTool(ragIdaTool, {
+      mode: "single",
+      projectDir: args.projectDir,
+      className: args.className,
+      idaRpcUrl: args.idaRpcUrl,
+    }, ctx)
+
+    if (!idaResult.error) {
+      log("✓ IDA 已获取，重新检索 Context...")
+      const refreshed = await callTool(ragRetrieverTool, {
+        projectDir: args.projectDir,
+        className: args.className,
+      }, ctx)
+      if (!refreshed.error) retrieveResult = refreshed
+    } else {
+      log(`⚠ IDA 获取失败: ${idaResult.error}，继续使用现有 Context`)
+    }
+  } else {
+    log("[2/3] IDA 判断：不需要")
+  }
+
+  // Step 3: 确定输出路径
+  const config = await loadProjectConfig(args.projectDir)
+  const scriptsDir = resolveScriptsDir(args.projectDir, config)
+  const outputPath = path.join(scriptsDir, `${args.className}.cs`)
+
+  log(`[3/3] Context 准备完成，输出路径: ${outputPath}`)
+
+  // 构建完整指令（供 opencode AI 在当前会话中执行）
+  const compileInstruction = args.projectPath
+    ? [
+        ``,
+        `## 全自动模式指令（AI 请执行）`,
+        ``,
+        `代码生成完成后，请按以下步骤操作：`,
+        ``,
+        `**步骤 1**：将上面生成的代码写入文件：`,
+        `\`\`\``,
+        `文件路径: ${outputPath}`,
+        `\`\`\``,
+        `使用 Edit 工具写入完整代码。`,
+        ``,
+        `**步骤 2**：调用 unity-compile-fix 工具启动自动编译修复循环：`,
+        `\`\`\`json`,
+        JSON.stringify({
+          projectPath: args.projectPath,
+          className: args.className,
+          iteration: 0,
+          maxIterations: args.maxIterations ?? 5,
+        }, null, 2),
+        `\`\`\``,
+        ``,
+        `**步骤 3**：根据 unity-compile-fix 的返回结果：`,
+        `- status: "success" → 调用 unity-rag-learn 保存到知识库`,
+        `- status: "needs_fix" → 按返回的修复指令修复代码，再次调用 unity-compile-fix`,
+        `- status: "needs_manual" / "stuck" / "gave_up" → 人工处理`,
+      ].join("\n")
+    : `\n💡 提示：提供 --projectPath 参数可启用自动编译功能。`
+
+  return {
+    output: `✅ Context 准备完成: ${args.className}
+
+${retrieveResult.output}
+${compileInstruction}
+
+---
+
+${retrieveResult.prompt}`,
+    prompt: retrieveResult.prompt,
+    outputPath,
+    projectDir: args.projectDir,
+    projectPath: args.projectPath,
+    className: args.className,
   }
 }

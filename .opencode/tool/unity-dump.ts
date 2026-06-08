@@ -1,6 +1,18 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
 import * as fs from "fs/promises"
+import { exec } from "child_process"
+import { promisify } from "util"
+
+const execAsync = promisify(exec)
+
+async function runCommand(ctx: any, command: string, options?: any): Promise<string> {
+  if (ctx.bash && typeof ctx.bash === "function") {
+    return await ctx.bash(command, options)
+  }
+  const { stdout, stderr } = await execAsync(command, { maxBuffer: 50 * 1024 * 1024, ...options })
+  return stdout + stderr
+}
 
 export default tool({
   description:
@@ -32,26 +44,72 @@ export default tool({
     const outputDir = args.outputDir || path.join(process.cwd(), "il2cpp_dump")
     await fs.mkdir(outputDir, { recursive: true })
 
-    // Il2CppDumper路径
-    const dumperPath = path.join(
+    // Il2CppDumper路径：优先 net6.0，其次 net8.0
+    const baseDir = path.join(
       process.cwd(),
-      "packages/opencode/unity-reverse-tools/external/Il2CppDumper/Il2CppDumper",
+      "packages/opencode/unity-reverse-tools/external/Il2CppDumper/Il2CppDumper/bin/Release",
     )
+    const net6Path = path.join(baseDir, "net6.0/Il2CppDumper")
+    const net8Path = path.join(baseDir, "net8.0/Il2CppDumper")
+    const useNet6 = await fileExists(net6Path)
+    const dumperPath = useNet6 ? net6Path : net8Path
 
     // 检查Il2CppDumper是否存在
-    const dumperExists = await fileExists(dumperPath)
-    if (!dumperExists) {
+    if (!(await fileExists(dumperPath))) {
       return {
-        output: `Error: Il2CppDumper not found at ${dumperPath}\nPlease build Il2CppDumper first.`,
+        output: `Error: Il2CppDumper not found at ${baseDir}/net6.0 or net8.0\nPlease build: cd packages/opencode/unity-reverse-tools/external/Il2CppDumper && dotnet build -c Release`,
         metadata: { success: false, error: "Il2CppDumper not found" },
       }
     }
 
+    // 确定 DOTNET_ROOT：Homebrew dotnet@6 路径与可执行文件预期的 /usr/local/share/dotnet 不同
+    // 通过设置 DOTNET_ROOT 环境变量让运行时能被正确找到
+    const dotnetRootCandidates = [
+      process.env.DOTNET_ROOT,
+      "/opt/homebrew/Cellar/dotnet@6/6.0.136_1/libexec", // Homebrew dotnet@6 (arm64)
+      "/usr/local/share/dotnet",
+      `${process.env.HOME}/.dotnet`,
+    ].filter(Boolean) as string[]
+
+    let dotnetRoot = ""
+    for (const candidate of dotnetRootCandidates) {
+      try {
+        await fs.access(path.join(candidate, "shared/Microsoft.NETCore.App"))
+        dotnetRoot = candidate
+        break
+      } catch {}
+    }
+
+    const envPrefix = dotnetRoot ? `DOTNET_ROOT="${dotnetRoot}" ` : ""
+
+    // 临时禁用 RequireAnyKey（防止进程阻塞等待键盘输入）
+    const configPath = path.join(path.dirname(dumperPath), "config.json")
+    let configBackup: string | null = null
+    try {
+      configBackup = await fs.readFile(configPath, "utf-8")
+      const config = JSON.parse(configBackup)
+      if (config.RequireAnyKey) {
+        config.RequireAnyKey = false
+        await fs.writeFile(configPath, JSON.stringify(config, null, 2))
+      } else {
+        configBackup = null // 无需恢复
+      }
+    } catch {}
+
     // 运行Il2CppDumper
-    const dumpOutput = await ctx.bash(
-      `"${dumperPath}" "${args.binaryPath}" "${args.metadataPath}" "${outputDir}"`,
-      { timeout: 300000 }, // 5分钟超时
-    )
+    let dumpOutput: string
+    try {
+      dumpOutput = await runCommand(
+        ctx,
+        `${envPrefix}"${dumperPath}" "${args.binaryPath}" "${args.metadataPath}" "${outputDir}"`,
+        { timeout: 300000 }, // 5分钟超时
+      )
+    } finally {
+      // 恢复 config.json
+      if (configBackup !== null) {
+        await fs.writeFile(configPath, configBackup).catch(() => {})
+      }
+    }
 
     // 验证输出文件
     const expectedFiles = {
@@ -304,7 +362,8 @@ idc.qexit(0)
 
   try {
     // 批处理模式运行IDA
-    await ctx.bash(
+    await runCommand(
+      ctx,
       `"${idaExecutable}" -A -S"${analysisScriptPath}" "${binaryPath}" > "${outputDir}/ida.log" 2>&1`,
       { timeout: 1800000 }, // 30分钟超时
     )

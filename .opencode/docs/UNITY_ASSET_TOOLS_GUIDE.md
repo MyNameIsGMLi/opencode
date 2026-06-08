@@ -21,9 +21,9 @@ libil2cpp.so + global-metadata.dat + Assets
    ↓
 dump.cs + script.json
    ↓
-[3] unity-asset-extract (提取资源)
+[3] unity-asset-rebinder (提取资源 + GUID 重绑定)
    ↓
-Textures + Models + Scenes + Prefabs
+Textures + Models + Scenes + Prefabs + 正确的 GUID/.meta
    ↓
 [4] /impl-unity (实现代码，RAG 增强)
    ↓
@@ -31,9 +31,7 @@ C# Scripts
    ↓
 [5] unity-scene-rebuilder (重建场景)
    ↓
-[6] unity-reference-fixer (修复引用)
-   ↓
-[7] unity-project-builder (构建完整项目)
+[6] unity-project-builder (构建完整项目)
    ↓
 可运行的 Unity 项目 ✅
 ```
@@ -109,9 +107,9 @@ namespace Game.Arrow
 
 ---
 
-### 3️⃣ unity-asset-extract - 提取资源 ⭐
+### 3️⃣ unity-asset-rebinder - 提取资源 + GUID 重绑定 ⭐
 
-**功能**：使用 AssetRipper 提取所有游戏资源。
+**功能**：使用 AssetRipper 提取所有游戏资源，并自动完成 GUID 重绑定——生成正确的 Script GUID（MonoScript 引用）、Asset GUID（Texture、Model 引用）及 `.meta` 文件，修复场景和 Prefab 中的引用。
 
 #### 前置条件
 
@@ -129,20 +127,27 @@ brew install --cask assetripper
 
 **基础用法**：
 ```bash
-opencode run unity-asset-extract \
+opencode run unity-asset-rebinder \
   --inputPath=/path/to/unpacked_apk \
-  --outputDir=/path/to/extracted_assets
+  --outputDir=/path/to/extracted_assets \
+  --projectDir=/path/to/unity_project \
+  --reversedCodeDir=/path/to/scripts
 ```
 
 **高级用法**：
 ```bash
-opencode run unity-asset-extract \
+opencode run unity-asset-rebinder \
   --inputPath=/path/to/unpacked_apk \
   --outputDir=/path/to/extracted_assets \
+  --projectDir=/path/to/unity_project \
+  --reversedCodeDir=/path/to/scripts \
   --assetRipperPath=/custom/path/to/AssetRipper \
   --includeScenes=true \
   --includePrefabs=true \
-  --includeScriptableObjects=true
+  --includeScriptableObjects=true \
+  --fixScriptReferences=true \
+  --fixAssetReferences=true \
+  --generateMetaFiles=true
 ```
 
 #### 输出结构
@@ -179,11 +184,23 @@ extracted_assets/
     └── ProjectSettings.asset
 ```
 
+GUID 重绑定后，每个资源都会附带正确的 `.meta` 文件，例如：
+
+```yaml
+# ArrowController.cs.meta
+fileFormatVersion: 2
+guid: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+```
+
 #### 资源统计
 
-工具会自动统计提取的资源：
+工具会自动统计提取和绑定的资源：
 ```
-✅ Asset extraction completed!
+✅ Asset extraction + rebinding completed!
 
 📊 Extracted assets:
 - Textures: 523
@@ -193,6 +210,11 @@ extracted_assets/
 - Prefabs: 234
 - Materials: 156
 - Animations: 89
+
+🔗 GUID rebinding:
+- Generated 125 script GUIDs
+- Fixed 234 prefab references
+- Created 523 .meta files
 
 📁 Output: /path/to/extracted_assets
 ```
@@ -248,38 +270,7 @@ rebuilt_scenes/
 
 ---
 
-### 6️⃣ unity-reference-fixer - 修复引用
-
-**功能**：生成正确的 GUID 和 .meta 文件，修复 Unity 引用。
-
-**使用方法**：
-```bash
-opencode run unity-reference-fixer \
-  --projectDir=/path/to/unity_project \
-  --reversedCodeDir=/path/to/scripts \
-  --extractedAssetsDir=/path/to/assets
-```
-
-**功能**：
-- 生成 Script GUID（MonoScript 引用）
-- 生成 Asset GUID（Texture、Model 引用）
-- 创建 .meta 文件
-- 修复场景和 Prefab 中的引用
-
-**示例**：
-```yaml
-# ArrowController.cs.meta
-fileFormatVersion: 2
-guid: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
-MonoImporter:
-  externalObjects: {}
-  serializedVersion: 2
-  defaultReferences: []
-```
-
----
-
-### 7️⃣ unity-project-builder - 构建完整项目
+### 6️⃣ unity-project-builder - 构建完整项目
 
 **功能**：组装所有部分，创建可在 Unity 中打开的完整项目。
 
@@ -346,17 +337,23 @@ opencode run unity-dump \
 # - dump.cs (3000+ classes)
 # - script.json
 
-# ==================== Step 3: 提取资源 ====================
-opencode run unity-asset-extract \
+# ==================== Step 3: 提取资源 + GUID 重绑定 ====================
+opencode run unity-asset-rebinder \
   --inputPath=~/ArcherGame/unpacked \
-  --outputDir=~/ArcherGame/assets
+  --outputDir=~/ArcherGame/assets \
+  --projectDir=~/ArcherGame/Project \
+  --reversedCodeDir=~/ArcherGame/Project/Assets/Scripts
 
 # 输出:
-# ✅ Asset extraction completed!
+# ✅ Asset extraction + rebinding completed!
 # 📊 Extracted:
 # - Textures: 523
 # - Prefabs: 234
 # - Scenes: 12
+# 🔗 GUID rebinding:
+# - Generated 125 script GUIDs
+# - Fixed 234 prefab references
+# - Created 523 .meta files
 
 # ==================== Step 4: 创建项目目录 ====================
 mkdir -p ~/ArcherGame/Project/Assets/Il2CppDump
@@ -412,19 +409,7 @@ opencode run unity-scene-rebuilder \
 # 输出:
 # ✅ Scenes rebuilt: 12
 
-# ==================== Step 10: 修复引用 ====================
-opencode run unity-reference-fixer \
-  --projectDir=~/ArcherGame/Project \
-  --reversedCodeDir=~/ArcherGame/Project/Assets/Scripts \
-  --extractedAssetsDir=~/ArcherGame/assets
-
-# 输出:
-# ✅ References fixed!
-# - Generated 125 script GUIDs
-# - Fixed 234 prefab references
-# - Created 523 .meta files
-
-# ==================== Step 11: 构建最终项目 ====================
+# ==================== Step 10: 构建最终项目 ====================
 opencode run unity-project-builder \
   --outputDir=~/ArcherGame/FinalProject \
   --reversedCodeDir=~/ArcherGame/Project/Assets/Scripts \
@@ -442,7 +427,7 @@ opencode run unity-project-builder \
 # 2. Fix remaining compilation errors
 # 3. Test in Play mode
 
-# ==================== Step 12: 在 Unity 中打开 ====================
+# ==================== Step 11: 在 Unity 中打开 ====================
 open -a Unity ~/ArcherGame/FinalProject
 ```
 
@@ -454,10 +439,9 @@ open -a Unity ~/ArcherGame/FinalProject
 |------|------|------|------|------|
 | **unity-unpack** | APK/IPA | libil2cpp.so + assets | 无 | ~1 分钟 |
 | **unity-dump** | libil2cpp.so + metadata | dump.cs + script.json | Il2CppDumper | ~2 分钟 |
-| **unity-asset-extract** | Assets 文件 | Textures/Models/Scenes | AssetRipper | ~10 分钟 |
+| **unity-asset-rebinder** | Assets 文件 + Scripts | Textures/Models/Scenes + GUIDs/.meta | AssetRipper | ~13 分钟 |
 | **/impl-unity** | dump.cs | C# Scripts | RAG + IDA (可选) | ~1 分钟/类 |
 | **unity-scene-rebuilder** | Scenes YAML | Unity Scenes | 无 | ~5 分钟 |
-| **unity-reference-fixer** | Scripts + Assets | GUIDs + .meta | 无 | ~3 分钟 |
 | **unity-project-builder** | All above | Unity Project | 无 | ~2 分钟 |
 
 ---
@@ -481,10 +465,11 @@ mkdir -p ~/UnPackTools/AssetRipper
 unzip AssetRipper_mac_x64.zip -d ~/UnPackTools/AssetRipper/
 
 # 或手动指定路径
-opencode run unity-asset-extract \
+opencode run unity-asset-rebinder \
   --assetRipperPath=/custom/path/to/AssetRipper \
   --inputPath=... \
-  --outputDir=...
+  --outputDir=... \
+  --projectDir=...
 ```
 
 ---
@@ -518,10 +503,12 @@ Script 'ArrowController' could not be found
 
 **解决**：
 ```bash
-# 重新运行 reference fixer
-opencode run unity-reference-fixer \
+# 重新运行 asset-rebinder（包含 GUID 重绑定）
+opencode run unity-asset-rebinder \
   --projectDir=/path/to/project \
-  --reversedCodeDir=/path/to/scripts
+  --reversedCodeDir=/path/to/scripts \
+  --inputPath=/path/to/unpacked \
+  --outputDir=/path/to/assets
 
 # 在 Unity 中刷新
 # Assets → Refresh (Cmd+R)
@@ -590,16 +577,15 @@ Unity 逆向工程完整流程：
 APK/IPA
   → unpack (解包)
   → dump (生成 dump.cs)
-  → asset-extract (提取资源) ⭐
+  → asset-rebinder (提取资源 + GUID 重绑定) ⭐
   → impl-unity (实现代码，RAG)
   → scene-rebuilder (重建场景)
-  → reference-fixer (修复引用)
   → project-builder (构建项目)
   → 可运行的 Unity 项目 ✅
 ```
 
 **关键工具**：
-- `unity-asset-extract` - 提取所有游戏资源
+- `unity-asset-rebinder` - 提取所有游戏资源并完成 GUID 重绑定
 - `/impl-unity` - RAG 增强的代码生成
 
 **预计耗时**：

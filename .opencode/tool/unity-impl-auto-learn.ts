@@ -1,6 +1,11 @@
 import { tool } from "@opencode-ai/plugin"
 import * as fs from "fs/promises"
 import * as path from "path"
+import ragLearnTool from "./unity-rag-learn"
+
+async function callTool(toolDef: any, args: any, ctx: any) {
+  return toolDef.execute(args, ctx)
+}
 
 /**
  * Unity 自动学习工具
@@ -89,13 +94,13 @@ async function learnSingleClass(args: any, ctx: any, scriptsDir: string, classNa
   }
 
   // 调用学习工具
-  const result = await ctx.tool("unity-rag-learn", {
+  const result = await callTool(ragLearnTool, {
     projectDir: args.projectDir,
     className,
     codePath,
     compileSuccess: true, // 假设已编译成功
     extractPatterns: true,
-  })
+  }, ctx)
 
   if (result.error) {
     return result
@@ -155,13 +160,13 @@ async function scanAndLearnAll(args: any, ctx: any, scriptsDir: string) {
       }
 
       // 调用学习工具
-      const result = await ctx.tool("unity-rag-learn", {
+      const result = await callTool(ragLearnTool, {
         projectDir: args.projectDir,
         className,
         codePath,
         compileSuccess: true,
         extractPatterns: true,
-      })
+      }, ctx)
 
       if (result.error) {
         results.push({ className, success: false, error: result.error })

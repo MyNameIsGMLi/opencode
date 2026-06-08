@@ -1,6 +1,18 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "path"
 import * as fs from "fs/promises"
+import { exec } from "child_process"
+import { promisify } from "util"
+
+const execAsync = promisify(exec)
+
+async function runCommand(ctx: any, command: string): Promise<string> {
+  if (ctx.bash && typeof ctx.bash === "function") {
+    return await ctx.bash(command)
+  }
+  const { stdout, stderr } = await execAsync(command)
+  return stdout + stderr
+}
 
 export default tool({
   description:
@@ -60,7 +72,8 @@ export default tool({
 })
 
 async function unpackAPK(inputPath: string, outputDir: string, ctx: any) {
-  const output = await ctx.bash(
+  const output = await runCommand(
+    ctx,
     `unzip -q "${inputPath}" -d "${outputDir}" 2>&1 || echo "unzip completed with warnings"`,
   )
 
@@ -114,7 +127,7 @@ async function unpackXAPK(inputPath: string, outputDir: string, ctx: any) {
   await fs.mkdir(tempDir, { recursive: true })
 
   // XAPK本身就是一个ZIP
-  await ctx.bash(`unzip -q "${inputPath}" -d "${tempDir}" 2>&1 || echo "unzip completed"`)
+  await runCommand(ctx, `unzip -q "${inputPath}" -d "${tempDir}" 2>&1 || echo "unzip completed"`)
 
   // 查找主APK和OBB文件
   const files = await fs.readdir(tempDir)
@@ -137,7 +150,14 @@ async function unpackXAPK(inputPath: string, outputDir: string, ctx: any) {
 
   // 解压主APK
   const mainApkPath = path.join(tempDir, mainApk)
-  await ctx.bash(`unzip -q "${mainApkPath}" -d "${outputDir}" 2>&1 || echo "unzip completed"`)
+  await runCommand(ctx, `unzip -q "${mainApkPath}" -d "${outputDir}" 2>&1 || echo "unzip completed"`)
+
+  // 解压所有 config APK（包含 split 的 so 库）
+  const configApks = apkFiles.filter((f) => f.includes("config") || f.includes("split"))
+  for (const configApk of configApks) {
+    const configPath = path.join(tempDir, configApk)
+    await runCommand(ctx, `unzip -qo "${configPath}" -d "${outputDir}" 2>&1 || echo "config apk extracted"`)
+  }
 
   // 处理OBB文件
   if (obbFiles.length > 0) {
@@ -147,7 +167,10 @@ async function unpackXAPK(inputPath: string, outputDir: string, ctx: any) {
     for (const obb of obbFiles) {
       const obbPath = path.join(tempDir, obb)
       // OBB文件也是ZIP格式
-      await ctx.bash(`unzip -q "${obbPath}" -d "${obbDir}/${path.basename(obb, ".obb")}" 2>&1 || echo "obb extracted"`)
+      await runCommand(
+        ctx,
+        `unzip -q "${obbPath}" -d "${obbDir}/${path.basename(obb, ".obb")}" 2>&1 || echo "obb extracted"`,
+      )
     }
   }
 
@@ -208,7 +231,7 @@ async function unpackIPA(inputPath: string, outputDir: string, ctx: any) {
   await fs.mkdir(tempDir, { recursive: true })
 
   // 解压IPA
-  await ctx.bash(`unzip -q "${inputPath}" -d "${tempDir}" 2>&1 || echo "unzip completed"`)
+  await runCommand(ctx, `unzip -q "${inputPath}" -d "${tempDir}" 2>&1 || echo "unzip completed"`)
 
   // 找到Payload目录中的.app
   const payloadDir = path.join(tempDir, "Payload")
@@ -234,7 +257,7 @@ async function unpackIPA(inputPath: string, outputDir: string, ctx: any) {
   // 复制.app到输出目录
   const appPath = path.join(payloadDir, appDir)
   const targetPath = path.join(outputDir, appDir)
-  await ctx.bash(`cp -r "${appPath}" "${targetPath}"`)
+  await runCommand(ctx, `cp -r "${appPath}" "${targetPath}"`)
 
   // 清理临时目录
   await fs.rm(tempDir, { recursive: true, force: true })
