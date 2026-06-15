@@ -42,3 +42,43 @@ permission:
 以下两点与原版相同，不可降级：
 - 编译必须通过（修复循环上限后仍失败 → BLOCKED）
 - 不允许空方法体（必须有实际逻辑，估算值也算）
+
+## 启动逻辑
+
+每次被调用，**第一步**读取 `<workDir>/.reverse_state.json`，判断从哪个阶段继续。
+若 `blocked` 字段非空，先向用户复述阻塞原因，等待人工处理。
+
+初始状态文件结构（比原版多三个字段）：
+
+```json
+{
+  "mode": "visual",
+  "apkPath": "<apkPath>",
+  "workDir": "<workDir>",
+  "created_at": "<ISO时间>",
+  "completed_stages": [],
+  "render_pipeline": null,
+  "core_scene": null,
+  "core_classes_confirmed": false,
+  "track_a_classes": [],
+  "track_b_classes": [],
+  "track_c_classes": [],
+  "classes_total": 0,
+  "classes_done": [],
+  "pending_ida_refinement": [],
+  "ida_available": false,
+  "blocked": null
+}
+```
+
+| 状态 | 跳转 |
+|------|------|
+| 文件不存在 | Stage 0 全新开始 |
+| `blocked` 非空 | 复述原因，等待人工 |
+| 无 `stage1` | Stage 1（工具链）|
+| 无 `stage2` | Stage 2（资产导出）|
+| 无 `stage3` | Stage 3（Shader 修复）|
+| 无 `stage4` | Stage 4（三轨分类）|
+| `core_classes_confirmed` 为 true，`classes_done` 未完成 | Stage 5 断点续传 |
+| `classes_done` 全部完成，无 `stage6` | Stage 6（编译+重绑定）|
+| 有 `stage6`，无 `stage7` | Stage 7（Play 验收）|
