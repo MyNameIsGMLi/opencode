@@ -316,3 +316,101 @@ LLM 从 dump.cs 推断合理实现，无需 IDA。
 ```
 
 **Token 耗尽处理**：主动输出当前进度后提示用户重新调用，Agent 会从断点（`classes_done`）自动续传。
+
+## Stage 6：DLL 提取 + 编译 + GUID 重绑定
+
+1. **缺失 DLL 提取**：调用 `unity-dll-extract` 从 DummyDll 提取第三方/闭源 SDK 的**真实引用 DLL**（带完整类型签名，非空 stub）放入 `Assets/Plugins/`：
+   ```
+   unity-dll-extract(
+     dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
+     targetProjectPath: workDir + "/target_project",
+     onlyClasses: <编译错误指名缺失的 DLL，如 ["AppsFlyer", "Unity.LevelPlay"]；不填则提取全部第三方 SDK>
+   )
+   ```
+   - IL2CPP 本质：Managed/ 无真实托管 DLL，DummyDll 即唯一来源（含完整签名）。
+   - 自动排除 UnityEngine.*/System.*/Assembly-CSharp（引擎自带或游戏自身代码）。
+   - 工具返回 `blocked: true`（DummyDll 缺失）→ **BLOCKED**，不许用空 stub 类替代。
+2. 派发 `@unity-asset-manager`（增量模式）做 GUID 重绑定，消除核心场景 Missing Script。
+3. 写入并运行 `Assets/Editor/MissingScriptChecker.cs`（batchmode），读取 `missing_script_report.txt`：
+   - **核心场景范围内**有 Missing Script → 派发 `@unity-asset-manager` 增量修复；仍无法消除 → **BLOCKED**。
+   - 核心场景外的第三方 Missing Script → 记录为已知缺失（不影响核心玩法场景 Play）。
+4. 全部通过后更新状态：追加 `"stage6"`。
+
+---
+
+## Stage 7 ⛔：Play 验收（表现对比，Go/No-Go #2）
+
+调用 `unity-play-smoke`（静态体检 + 一键可 Play 准备）：
+```
+unity-play-smoke(
+  projectPath: workDir + "/target_project",
+  coreScene: <core_scene 的 Assets 相对路径>
+)
+```
+
+工具静态体检：
+1. 核心场景能否被 Editor 加载（OpenScene）
+2. 核心场景 Missing Script 数（必须为 0）
+3. 编译错误数（必须为 0）
+4. 把核心场景设为启动场景，输出人工 Play 指引
+
+`assessment: "READY"` → 向用户呈现人工 Play 指引 + 最终报告：
+
+```
+表现还原验收报告
+
+核心场景：<场景名>  渲染管线：<pipeline>（已对齐）
+粉红材质：0  Missing Script：0（核心场景）
+关键玩法类：N/N 实现（零空方法体）
+
+验收维度（表现优先，由人工 Play 确认）：
+  [ ] 动画播放：交互后动画触发，视觉流畅
+  [ ] 特效触发：关键事件时特效出现
+  [ ] 音效响应：交互有声音反馈
+  [ ] UI 过渡：界面切换有动效
+  逻辑数值精确度：不要求（表现接近即可）
+
+验收结论：[ 接近 / 部分接近+差距清单 / 需修复 ]
+
+待 IDA 补精清单（Track C，共 M 个）：
+  - CardFlipManager.FlipCard()    DOTween duration estimated 0.3s
+  - ComboEffectController.Show()  DOTween ease estimated OutBounce
+  如需精确参数，回复"补精 <类名>"即可启动 IDA 分析。
+
+工程位置：<workDir>/target_project
+```
+
+`assessment: "NOT-READY"` → **BLOCKED**，报告阻塞项，回到 Stage 5 补齐后重测。
+
+---
+
+## IDA 按需补精触发
+
+用户在任意阶段可发出"**补精 <类名>**"指令，Agent 执行：
+
+1. 调用 IDA 就绪检测（见辅助函数）
+2. 派发 `@unity-ida-analyst`，传入 `className`、`libil2cpp_path`、`script_json_path`、`projectDir`
+3. 派发 `@unity-code-generator`（`mode: "visual"`、`track: "C"`、`idaData: <返回数据>`）更新实现
+4. 编译通过后从 `pending_ida_refinement` 移除该类，更新状态文件
+5. 报告补精结果：精确化了哪些参数（duration/ease/delay 等）
+
+---
+
+## IDA 就绪检测（辅助函数）
+
+当需要 IDA 分析时调用：
+
+```
+1. curl -s -X POST http://localhost:7734/ping -m 3
+   → 成功 → 就绪，直接返回
+
+2. 失败 → 启动 IDA：
+   open -a "/Applications/IDA Professional 9.2.app" <libil2cpp_path>
+
+3. 每 10 秒轮询一次，最多 30 次（5 分钟）
+   → 成功 → 就绪
+
+4. 5 分钟后仍未就绪 → 暂停，告知用户：
+   "IDA RPC 服务未响应，请检查 IDA 是否已加载 RPC 插件（端口 7734）
+    就绪后回复 continue 继续，或回复 skip 跳过 IDA 分析。"
+```
