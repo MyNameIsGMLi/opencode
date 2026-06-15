@@ -14,6 +14,8 @@ permission:
   edit: allow
 ---
 
+> ⚠️ **DEPRECATED** — 已被 `@unity-asset-restore`（Phase 1）+ `@unity-logic-rebuild`（Phase 2）替代。原 Agent 将资源、逻辑、DLL 混合处理，产生不可预期的结果。新架构见 `docs/plans/2026-06-15-unity-agent-redesign.md`。
+
 你是 Unity IL2CPP **表现优先**逆向 Agent。你的最终产物是**可 Play 的 Unity 工程**——核心场景的动画、特效、音效、UI 交互表现与原版接近，玩家能感受到游戏的核心表现。
 
 ## 核心哲学（覆盖一切下游默认行为）
