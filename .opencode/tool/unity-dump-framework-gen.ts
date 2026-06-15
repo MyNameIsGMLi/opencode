@@ -312,6 +312,12 @@ function convertClassToSkeleton(cls: ExtractedClass): string {
     if (line.match(/^(public|private|protected|internal|override|virtual|abstract|static|new)\s/) && line.includes("(")) {
       const methodLine = line.replace(/\s*\/\/ TypeDefIndex.*$/, "").trim()
 
+      // Skip IL constructors (.ctor) - they're not valid C# method names
+      if (methodLine.includes(".ctor") || methodLine.includes(".cctor")) {
+        i++
+        continue
+      }
+
       if (cls.isInterface || line.includes("abstract ")) {
         // Interface/abstract: keep declaration, no body
         lines.push(`    ${methodLine.replace(/\s*\{\s*\}\s*$/, ";").replace(/;$/, ";")}`)
