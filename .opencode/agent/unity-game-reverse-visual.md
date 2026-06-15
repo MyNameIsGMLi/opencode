@@ -360,7 +360,7 @@ LLM 从 dump.cs 推断合理实现，无需 IDA。
 
 `@unity-code-generator` 返回 `status: "blocked"` 时：
 - `blockKind: "compile_failed"`（超限编译失败）→ **BLOCKED**，写入状态文件 `blocked` 字段，停止整流程，向用户报告
-- `blockKind: "missing_dll"`（缺第三方 DLL）→ **BLOCKED**，交 Stage 6 提取真实 DLL 后重试
+- `blockKind: "missing_dll"`（缺第三方 DLL）→ 记录到"待用户导入插件清单"，用 `using` 条件编译或最简 stub 绕过后继续，**不 BLOCKED**
 - 注意：`blockKind: "logic_unfixable"` **不是阻塞条件**——visual 模式下用更简单的合理实现重试一次
 
 每完成 10 个类，执行增量编译检查：
@@ -380,24 +380,45 @@ unity-editor-compile(projectPath: projectDir, timeout: 120)
 
 **Token 耗尽处理**：主动输出当前进度后提示用户重新调用，Agent 会从断点（`classes_done`）自动续传。
 
-## Stage 6：DLL 提取 + 编译 + GUID 重绑定
+## Stage 6：编译 + GUID 重绑定
 
-1. **缺失 DLL 提取**：调用 `unity-dll-extract` 从 DummyDll 提取第三方/闭源 SDK 的**真实引用 DLL**（带完整类型签名，非空 stub）放入 `Assets/Plugins/`：
-   ```
-   unity-dll-extract(
-     dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
-     targetProjectPath: workDir + "/target_project",
-     onlyClasses: <编译错误指名缺失的 DLL，如 ["AppsFlyer", "Unity.LevelPlay"]；不填则提取全部第三方 SDK>
-   )
-   ```
-   - IL2CPP 本质：Managed/ 无真实托管 DLL，DummyDll 即唯一来源（含完整签名）。
-   - 自动排除 UnityEngine.*/System.*/Assembly-CSharp（引擎自带或游戏自身代码）。
-   - 工具返回 `blocked: true`（DummyDll 缺失）→ **BLOCKED**，不许用空 stub 类替代。
-2. 派发 `@unity-asset-manager`（增量模式）做 GUID 重绑定，消除核心场景 Missing Script。
-3. 写入并运行 `Assets/Editor/MissingScriptChecker.cs`（batchmode），读取 `missing_script_report.txt`：
-   - **核心场景范围内**有 Missing Script → 派发 `@unity-asset-manager` 增量修复；仍无法消除 → **BLOCKED**。
-   - 核心场景外的第三方 Missing Script → 记录为已知缺失（不影响核心玩法场景 Play）。
-4. 全部通过后更新状态：追加 `"stage6"`。
+**第三方商业插件处理原则**：
+- **不从 DummyDll 提取第三方插件 DLL**。DummyDll 里的第三方插件是 IL2CPP stripped 版，放入 Unity Editor（Mono）会被标记为 `broken assembly`，触发 TypeLoadException 并导致 Play 时 segfault 崩溃。
+- 第三方插件需由用户自行从 Asset Store / 官方 GitHub 获取 Editor 兼容版本，Stage 7 报告会列出清单。
+- **只提取游戏自身的 Loom.\* / Crescive.\* 等自有命名空间 DLL**（非第三方商业插件，不在下方黑名单中）。
+
+**已知不可从 DummyDll 提取的第三方商业插件黑名单**（这些必须用户自行导入）：
+```
+MessagePack, Obi, UniTask, Sirenix/Odin Inspector,
+DOTween Pro, LeanTween, Firebase, AppsFlyer, MaxSdk,
+GoogleMobileAds, Facebook, Nakama, Dreamteck Splines,
+Coffee.UIEffect, Coffee.UIParticle
+```
+
+### Step 1：仅提取自有 DLL（排除黑名单）
+
+调用 `unity-dll-extract`，**只提取编译错误明确指名缺失的 DLL**，且排除黑名单中的名称：
+```
+unity-dll-extract(
+  dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
+  targetProjectPath: workDir + "/target_project",
+  onlyClasses: <仅填写编译错误指名缺失、且不在黑名单中的 DLL 名>
+)
+```
+
+若编译错误全部来自黑名单插件 → 跳过此步，在 Stage 7 报告中列出需要用户导入的插件清单。
+
+### Step 2：GUID 重绑定
+
+派发 `@unity-asset-manager`（增量模式）做 GUID 重绑定，消除核心场景 Missing Script。
+
+### Step 3：Missing Script 检查
+
+写入并运行 `Assets/Editor/MissingScriptChecker.cs`（batchmode），读取 `missing_script_report.txt`：
+- **核心场景范围内**有 Missing Script → 派发 `@unity-asset-manager` 增量修复；仍无法消除 → **BLOCKED**。
+- 核心场景外的第三方 Missing Script → 记录为已知缺失，归入 Stage 7 的"待用户导入插件清单"。
+
+全部通过后更新状态：追加 `"stage6"`。
 
 ---
 
@@ -439,6 +460,13 @@ unity-play-smoke(
   - CardFlipManager.FlipCard()    DOTween duration estimated 0.3s
   - ComboEffectController.Show()  DOTween ease estimated OutBounce
   如需精确参数，回复"补精 <类名>"即可启动 IDA 分析。
+
+需要用户手动导入的第三方插件（共 N 个）：
+  以下插件在工程中被引用，但无法从 IL2CPP 产物中获取 Editor 兼容版本，
+  请从 Asset Store / 官方 GitHub 自行导入后工程即可完整运行：
+  - <插件名> <版本（如已知）> → <获取地址（Asset Store/GitHub）>
+  - ...
+  导入后请重新编译，Missing Script 和编译错误将自动消除。
 
 工程位置：<workDir>/target_project
 ```
