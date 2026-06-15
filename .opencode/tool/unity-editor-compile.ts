@@ -71,13 +71,70 @@ export default tool({
         return { error: `无法读取 ${versionFile}，请确认这是一个 Unity 项目目录` }
       }
     }
-
-    // ── Step 2: 定位 Unity 可执行文件 ─────────────────────────────
-    // unityVersion 此时一定已赋值（上面的 return 确保了这一点）
     const resolvedVersion = unityVersion as string
+
+    // ── Step 2: 检测 Unity Editor 是否已打开此项目 ────────────────
+    // 若已打开，headless 实例会立即退出（"another Unity instance is running"）
+    // 此时应直接从 Editor.log 解析最新编译结果，而非启动 headless
+    const editorRunning = await isEditorRunningProject(args.projectPath, ctx)
+    if (editorRunning) {
+      const editorLogPath = `${process.env.HOME}/Library/Logs/Unity/Editor.log`
+      let editorLog = ""
+      try {
+        editorLog = await Bun.file(editorLogPath).text()
+      } catch {
+        return { error: `Unity Editor 正在运行但无法读取 Editor.log: ${editorLogPath}` }
+      }
+
+      // 截取最新一次编译会话（从最后一个 "Initialize engine version" 开始）
+      const sessions = editorLog.split("Initialize engine version:")
+      const lastSession = sessions.length > 1 ? sessions[sessions.length - 1] : editorLog
+
+      const { errors, warnings } = parseUnityLog(lastSession)
+      // Editor 有编译错误时会输出 "Scripts have compiler errors"
+      const hasCompileErrors = lastSession.includes("Scripts have compiler errors") || errors.length > 0
+      const success = !hasCompileErrors
+
+      const duration = Date.now() - startTime
+      return {
+        success,
+        exitCode: success ? 0 : 1,
+        errors,
+        warnings,
+        duration,
+        logPath: editorLogPath,
+        unityVersion: resolvedVersion,
+        unityPath: "(Editor already running)",
+        source: "editor-log",
+        output: success
+          ? [
+              `✅ Unity 编译成功（从 Editor.log 读取）`,
+              ``,
+              `版本: ${resolvedVersion}`,
+              warnings.length > 0 ? `警告: ${warnings.length} 条` : "",
+              `日志来源: ${editorLogPath}`,
+            ].filter(Boolean).join("\n")
+          : [
+              `❌ Unity 编译失败（从 Editor.log 读取）`,
+              ``,
+              `版本: ${resolvedVersion}`,
+              `错误: ${errors.length} 个`,
+              ``,
+              `前 5 个错误:`,
+              ...errors.slice(0, 5).map(e =>
+                `  ${e.file}(${e.line},${e.column}): ${e.code}: ${e.message}`
+              ),
+              errors.length > 5 ? `  ... 共 ${errors.length} 个错误` : "",
+              ``,
+              `日志来源: ${editorLogPath}`,
+              `提示: 请在 Unity Editor 中 Assets → Refresh 后重新检查`,
+            ].filter(Boolean).join("\n"),
+      }
+    }
+
+    // ── Step 3: Editor 未运行，走 headless 编译 ───────────────────
     const unityPath = await findUnityExecutable(resolvedVersion, ctx)
     if (!unityPath) {
-      // 列出已安装版本
       const installed = await listInstalledVersions(ctx)
       return {
         error: [
@@ -87,15 +144,11 @@ export default tool({
           ...installed.map(v => `  - ${v}`),
           ``,
           `请安装对应版本或通过 --unityVersion 指定已安装的版本。`,
-          `版本模糊匹配规则：major.minor 相同时自动选择最新补丁版本。`,
         ].join("\n"),
       }
     }
 
-    // ── Step 3: 准备日志文件 ───────────────────────────────────────
     const logFile = args.logFile ?? `/tmp/unity_compile_${Date.now()}.log`
-
-    // ── Step 4: 执行 Unity 编译 ─────────────────────────────────────
     const timeout = (args.timeout ?? 180) * 1000
     const cmd = [
       `"${unityPath}"`,
@@ -107,18 +160,22 @@ export default tool({
       `-accept-apiupdate`,
     ].join(" ")
 
-    // 后台启动 Unity（不阻塞）
     await ctx.bash(`${cmd} > /dev/null 2>&1 &`)
-
-    // ── Step 5: 轮询等待编译完成 ───────────────────────────────────
     const pollResult = await pollCompilation(logFile, timeout, args.projectPath, ctx)
 
-    // ── Step 6: 解析日志 ───────────────────────────────────────────
     let fullLog = ""
     try {
       fullLog = await Bun.file(logFile).text()
-    } catch {
-      // 日志可能不存在（Unity 启动失败）
+    } catch {}
+
+    // 检测 headless 被另一个 Editor 实例阻断的情况
+    if (fullLog.includes("another Unity instance is running")) {
+      return {
+        error: [
+          `Unity Editor 正在运行此项目，headless 编译被阻断。`,
+          `请关闭 Unity Editor 后重试，或在 Editor 中手动检查 Console 的编译错误。`,
+        ].join("\n"),
+      }
     }
 
     const { errors, warnings } = parseUnityLog(fullLog)
@@ -145,16 +202,14 @@ export default tool({
       output: success
         ? [
             `✅ Unity 编译成功`,
-            ``,
-            `版本: ${unityVersion}`,
+            `版本: ${resolvedVersion}`,
             `耗时: ${(duration / 1000).toFixed(1)}s`,
             warnings.length > 0 ? `警告: ${warnings.length} 条` : "",
             `日志: ${logFile}`,
           ].filter(Boolean).join("\n")
         : [
             `❌ Unity 编译失败`,
-            ``,
-            `版本: ${unityVersion}`,
+            `版本: ${resolvedVersion}`,
             `耗时: ${(duration / 1000).toFixed(1)}s`,
             `错误: ${errors.length} 个`,
             ``,
@@ -163,7 +218,6 @@ export default tool({
               `  ${e.file}(${e.line},${e.column}): ${e.code}: ${e.message}`
             ),
             errors.length > 5 ? `  ... 共 ${errors.length} 个错误` : "",
-            ``,
             `日志: ${logFile}`,
           ].filter(Boolean).join("\n"),
     }
@@ -205,6 +259,37 @@ async function listInstalledVersions(ctx: any): Promise<string[]> {
     return result.trim().split("\n").filter(Boolean)
   } catch {
     return []
+  }
+}
+
+// 检测 Unity Editor 是否正在运行指定项目
+// 通过项目目录下的 Temp/UnityLockfile 判断（Editor 运行时会持有此锁文件）
+async function isEditorRunningProject(projectPath: string, ctx: any): Promise<boolean> {
+  // 方法1：检查锁文件
+  const lockFile = path.join(projectPath, "Temp", "UnityLockfile")
+  try {
+    await Bun.file(lockFile).text()
+    // 锁文件存在，再确认进程是否真的在运行
+    const pid = await ctx.bash(`pgrep -f "Unity" | head -1 2>/dev/null || echo ""`)
+    return pid.trim().length > 0
+  } catch {
+    // 锁文件不存在
+  }
+
+  // 方法2：检查 Unity 进程中是否有该项目路径
+  try {
+    const result = await ctx.bash(
+      `pgrep -lf "Unity" 2>/dev/null | grep -v "batchmode\|headless" | head -1 || echo ""`
+    )
+    if (!result.trim()) return false
+    // Unity Editor 在运行，检查它打开的是不是这个项目
+    const projectName = path.basename(projectPath)
+    const checkResult = await ctx.bash(
+      `pgrep -lf "Unity.*${projectName}" 2>/dev/null | head -1 || echo ""`
+    )
+    return checkResult.trim().length > 0
+  } catch {
+    return false
   }
 }
 
