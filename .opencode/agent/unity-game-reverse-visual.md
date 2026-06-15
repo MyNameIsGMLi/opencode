@@ -408,12 +408,13 @@ unity-editor-compile(projectPath: projectDir, timeout: 120)
 
 ## Stage 6：框架源码复制 + DLL 补全 + 编译 + GUID 重绑定
 
-### DLL 策略（三类分治）
+### DLL 与源码策略（三类分治）
 
 **类型 A：游戏自有框架（Crescive.\* / Loom.\*）**
 - AssetRipper 已将这些 export 为 C# 源码（`source_export/ExportedProject/Assets/Scripts/Crescive.*` 等）
 - **直接复制源码到 target_project/Assets/Scripts/**，无需 DLL
-- 不得从 DummyDll 提取这类 DLL（stripped IL2CPP 版 + 相互依赖 → Editor Mono 环境连锁失败）
+- 不得从 DummyDll 提取这类 DLL（stripped IL2CPP 版 + 相互依赖 → Editor Mono 连锁失败）
+- ⚠️ AssetRipper export 会丢失泛型参数（IL2CPP 泛型消除），Step 2 负责修复
 
 **类型 B：真正的第三方库（UniTask / Sirenix / Unity.* 包）**
 - 脚本有 `using`，但没有 C# 源码可用
@@ -423,7 +424,7 @@ unity-editor-compile(projectPath: projectDir, timeout: 120)
 - 脚本没有直接 `using`，只是场景/Prefab 中挂载
 - **不提取，不放入 Plugins**，在 Stage 7 报告中列出"需要用户导入"清单
 
-### Step 1：复制游戏框架 C# 源码
+### Step 1：复制游戏框架 C# 源码（类型 A）
 
 ```bash
 SRC="<workDir>/source_export/ExportedProject/Assets/Scripts"
@@ -436,7 +437,27 @@ for dir in $(ls "$SRC" | grep -E "^Crescive\.|^Loom\."); do
 done
 ```
 
-### Step 2：提取第三方库 DLL（类型 B）
+### Step 2：修复泛型类型（从 dump.cs 生成骨架，不依赖任何其他工程）
+
+AssetRipper export 的 C# 源码会丢失泛型参数（`Getter<T>` 变成 `Getter`），导致游戏代码编译失败。
+`unity-dump-framework-gen` 工具直接从 dump.cs 提取完整的泛型定义，自动生成可编译的骨架文件：
+
+```
+unity-dump-framework-gen(
+  dumpCsPath: workDir + "/il2cpp/dump_output/dump.cs",
+  outputDir: workDir + "/target_project/Assets/Scripts/CresciveGenericStubs",
+  scriptsDir: workDir + "/target_project/Assets/Scripts",
+  conflictDir: workDir + "/target_project/Assets/Scripts"
+)
+```
+
+工具会：
+1. 扫描 Scripts 目录，检测实际用到的泛型类（`Getter<T>`、`Var<T>` 等）
+2. 从 dump.cs 提取完整的泛型版本（包含泛型参数和成员签名）
+3. 转换为可编译的 C# 骨架（方法体 `return default;` 或 `throw new NotImplementedException()`）
+4. 自动移除 AssetRipper export 中冲突的非泛型版本
+
+### Step 3：提取第三方库 DLL（类型 B）
 
 调用 `unity-dll-extract`，只提取脚本实际引用且无源码的 DLL：
 ```

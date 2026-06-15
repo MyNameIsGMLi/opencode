@@ -289,7 +289,17 @@ for each className in remaining_classes:
    done
    ```
 
-2. **提取第三方库 DLL**：
+2. **修复泛型类型**（从 dump.cs 生成骨架，不依赖任何其他工程）：
+   ```
+   unity-dump-framework-gen(
+     dumpCsPath: workDir + "/il2cpp/dump_output/dump.cs",
+     outputDir: workDir + "/target_project/Assets/Scripts/CresciveGenericStubs",
+     scriptsDir: workDir + "/target_project/Assets/Scripts",
+     conflictDir: workDir + "/target_project/Assets/Scripts"
+   )
+   ```
+
+3. **提取第三方库 DLL**：
    ```
    unity-dll-extract(
      dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
