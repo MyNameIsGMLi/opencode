@@ -380,24 +380,39 @@ unity-editor-compile(projectPath: projectDir, timeout: 120)
 
 **Token 耗尽处理**：主动输出当前进度后提示用户重新调用，Agent 会从断点（`classes_done`）自动续传。
 
-## Stage 6：编译 + GUID 重绑定
+## Stage 6：框架源码复制 + DLL 补全 + 编译 + GUID 重绑定
 
-**第三方商业插件处理原则**：
-- **不从 DummyDll 提取第三方插件 DLL**。DummyDll 里的第三方插件是 IL2CPP stripped 版，放入 Unity Editor（Mono）会被标记为 `broken assembly`，触发 TypeLoadException 并导致 Play 时 segfault 崩溃。
-- 第三方插件需由用户自行从 Asset Store / 官方 GitHub 获取 Editor 兼容版本，Stage 7 报告会列出清单。
-- **只提取游戏自身的 Loom.\* / Crescive.\* 等自有命名空间 DLL**（非第三方商业插件，不在下方黑名单中）。
+### DLL 策略（三类分治）
 
-**已知不可从 DummyDll 提取的第三方商业插件黑名单**（这些必须用户自行导入）：
+**类型 A：游戏自有框架（Crescive.\* / Loom.\*）**
+- AssetRipper 已将这些 export 为 C# 源码（`source_export/ExportedProject/Assets/Scripts/Crescive.*` 等）
+- **直接复制源码到 target_project/Assets/Scripts/**，无需 DLL
+- 不得从 DummyDll 提取这类 DLL（stripped IL2CPP 版 + 相互依赖 → Editor Mono 环境连锁失败）
+
+**类型 B：真正的第三方库（UniTask / Sirenix / Unity.* 包）**
+- 脚本有 `using`，但没有 C# 源码可用
+- 从 DummyDll 提取，meta 设 `Any: enabled: 0` + `Editor: enabled: 1`（仅编译引用，不运行时加载）
+
+**类型 C：纯 SDK（Firebase / AppsFlyer / MaxSdk / DOTween 等）**
+- 脚本没有直接 `using`，只是场景/Prefab 中挂载
+- **不提取，不放入 Plugins**，在 Stage 7 报告中列出"需要用户导入"清单
+
+### Step 1：复制游戏框架 C# 源码
+
+```bash
+SRC="<workDir>/source_export/ExportedProject/Assets/Scripts"
+DST="<workDir>/target_project/Assets/Scripts"
+
+# 复制所有 Crescive.* 和 Loom.* 源码目录
+for dir in $(ls "$SRC" | grep -E "^Crescive\.|^Loom\."); do
+  cp -R "$SRC/$dir" "$DST/$dir"
+  [ -f "$SRC/${dir}.meta" ] && cp "$SRC/${dir}.meta" "$DST/${dir}.meta"
+done
 ```
-MessagePack, Obi, UniTask, Sirenix/Odin Inspector,
-DOTween Pro, LeanTween, Firebase, AppsFlyer, MaxSdk,
-GoogleMobileAds, Facebook, Nakama, Dreamteck Splines,
-Coffee.UIEffect, Coffee.UIParticle
-```
 
-### Step 1：按脚本引用精确提取 DLL
+### Step 2：提取第三方库 DLL（类型 B）
 
-调用 `unity-dll-extract`，传入 `scriptsDir` 让工具扫描脚本 `using` 指令，**只提取脚本实际引用的 DLL**：
+调用 `unity-dll-extract`，只提取脚本实际引用且无源码的 DLL：
 ```
 unity-dll-extract(
   dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
@@ -406,10 +421,8 @@ unity-dll-extract(
 )
 ```
 
-工具会自动：
-- 扫描所有 .cs 文件的 `using` 命名空间根前缀
-- 只提取命名空间前缀匹配的 DLL（排除 Firebase/AppsFlyer/MaxSdk 等脚本未 using 的纯 SDK）
-- 生成正确的 meta（`Any: enabled: 0` + `Editor: enabled: 1`，编译引用但不在 Editor 运行时加载）
+工具自动扫描 `using`，排除 Crescive/Loom（已有源码），排除纯 SDK。
+meta 自动设为 `Any: enabled: 0` + `Editor: enabled: 1`。
 
 ### Step 2：GUID 重绑定
 

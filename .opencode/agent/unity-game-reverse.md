@@ -264,9 +264,32 @@ for each className in remaining_classes:
 
 ---
 
-## Stage 6：DLL 提取 + 编译 + GUID 重绑定
+## Stage 6：框架源码复制 + DLL 补全 + 编译 + GUID 重绑定
 
-1. **缺失 DLL 提取**：调用 `unity-dll-extract` 从 DummyDll 提取第三方/闭源 SDK 的**真实引用 DLL**（带完整类型签名，非空 stub）放入 `Assets/Plugins/`：
+### DLL 策略（三类分治）
+
+**类型 A：游戏自有框架（Crescive.\* / Loom.\* 等）**
+- AssetRipper 已将这些 export 为 C# 源码（`source_export/ExportedProject/Assets/Scripts/`）
+- **直接复制源码到 target_project/Assets/Scripts/**，不用 DLL
+- 禁止从 DummyDll 提取这类 DLL（stripped IL2CPP 版在 Editor Mono 环境连锁失败）
+
+**类型 B：真正的第三方库（UniTask / Sirenix 等）**
+- 脚本有 `using`，没有源码
+- 从 DummyDll 提取，meta 设 `Any: enabled: 0` + `Editor: enabled: 1`
+
+**类型 C：纯 SDK（Firebase / AppsFlyer / MaxSdk 等）**
+- 脚本无直接 `using`，不提取，Stage 7 报告中列出用户导入清单
+
+1. **复制游戏框架源码**：
+   ```bash
+   SRC="<workDir>/source_export/ExportedProject/Assets/Scripts"
+   DST="<workDir>/target_project/Assets/Scripts"
+   for dir in $(ls "$SRC" | grep -E "^Crescive\.|^Loom\."); do
+     cp -R "$SRC/$dir" "$DST/$dir"
+   done
+   ```
+
+2. **提取第三方库 DLL**：
    ```
    unity-dll-extract(
      dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
@@ -274,9 +297,8 @@ for each className in remaining_classes:
      scriptsDir: workDir + "/target_project/Assets/Scripts"
    )
    ```
-   - `scriptsDir` 让工具扫描脚本 `using`，只提取被引用的 DLL，排除 Firebase/AppsFlyer/MaxSdk 等纯 SDK。
-   - 生成正确 meta：`Any: enabled: 0`（不在 Editor 运行时加载）+ `Editor: enabled: 1`（编译引用）。
-   - 工具返回 `blocked: true`（DummyDll 缺失）→ **BLOCKED**，**不许用空 stub 类替代**。
+   工具自动扫描 using，排除已有源码的 Crescive/Loom，只提取真正缺失的 DLL。
+   - 工具返回 `blocked: true`（DummyDll 缺失）→ **BLOCKED**。
 2. 派发 `@unity-asset-manager`（增量模式）做 GUID 重绑定，消除核心场景 Missing Script。
 3. 写入并运行 `Assets/Editor/MissingScriptChecker.cs`（batchmode），读取 `missing_script_report.txt`：
    - **核心场景范围内**有 Missing Script → 派发 `@unity-asset-manager` 增量修复；仍无法消除 → **BLOCKED**。
