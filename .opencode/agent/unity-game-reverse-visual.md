@@ -63,6 +63,7 @@ permission:
   "track_a_classes": [],
   "track_b_classes": [],
   "track_c_classes": [],
+  "track_p_classes": [],
   "classes_total": 0,
   "classes_done": [],
   "pending_ida_refinement": [],
@@ -216,9 +217,40 @@ unity-core-scene-finder(
 
 从返回的关键玩法类清单开始三轨分类。
 
+### 4a-2. 依赖图分析（P 轨识别）
+
+在三轨分类前，从 dump.cs 识别接口和抽象基类作为 P 轨候选：
+
+```bash
+python3 -c "
+import re, json, sys
+dump = open(sys.argv[1]).read()
+core = {c['name'] for c in json.load(open(sys.argv[2]))}
+p = []
+for m in re.finditer(r'// Namespace: (.*?)\npublic interface (\w+)', dump):
+    if m.group(2) in core:
+        p.append({'name': m.group(2), 'track': 'P', 'reason': 'interface'})
+for m in re.finditer(r'// Namespace: (.*?)\npublic abstract class (\w+)', dump):
+    if m.group(2) in core:
+        p.append({'name': m.group(2), 'track': 'P', 'reason': 'abstract_class'})
+print(json.dumps(p, indent=2))
+" <dumpCsPath> <workDir>/core_classes.json > <workDir>/track_p_candidates.json
+```
+
+将识别到的 P 轨候选从三轨清单中移出，优先实现。
+
 ### 4b. 三轨分类规则
 
-对每个关键玩法类，按以下规则分配轨道（优先级：C > A > B）：
+对每个关键玩法类，按以下规则分配轨道（优先级：P > C > A > B）：
+
+**前置轨道 P（精确签名，最高优先级）** — 满足任一条件：
+- 类型是 `interface`（dump.cs 中 `public interface`）
+- 类型是抽象基类（`public abstract class`）
+- 实现策略：**严格按 dump.cs 签名生成**，不允许推断缺省实现
+  - 接口：每个方法体 `return default;`，不省略任何成员
+  - 抽象基类：抽象方法体 `throw new NotImplementedException();`，非抽象方法调用 base
+- IDA：不需要
+- **必须在所有其他轨道之前实现完毕；P 轨编译失败立即 BLOCKED**
 
 **轨道 A（资产驱动）** — 满足任一条件：
 - 字段类型含 `AnimationClip`、`AudioClip`、`ParticleSystem`、`Animator`、`AudioSource`
@@ -254,17 +286,40 @@ unity-core-scene-finder(
   - CardFlipManager  [Sequence 字段，DOTween]
   - ComboEffectController  [方法名含 TweenScale]
 
+前置轨道 P（精确签名，共 N 个，最先实现）：
+  - IAttachmentSource  [interface，被多个类引用]
+  - AttachablesSystem  [abstract class]
+
 请回复"确认"，或告诉我需要调整的分类。
 ```
 
 用户确认后：
-- 写入 `track_a_classes`、`track_b_classes`、`track_c_classes` 到状态文件
+- 写入 `track_p_classes`、`track_a_classes`、`track_b_classes`、`track_c_classes` 到状态文件
 - 写入 `<workDir>/core_classes.json`（全部三轨合并，每条记录含 `track` 字段）
 - 更新状态：`core_classes_confirmed: true`、`classes_total: N`、`completed_stages` 追加 `"stage4"`
 
 ## Stage 5：三轨实现循环（表现优先，合理推断）
 
-读取 `<workDir>/core_classes.json`，过滤 `classes_done` 中已完成的类，对剩余每个类按轨道执行：
+读取 `<workDir>/core_classes.json`，过滤 `classes_done` 中已完成的类，按以下**严格顺序**执行：
+
+**实现顺序：P 轨 → A 轨 → C 轨 → B 轨（B 轨按 unity-target-finder 拓扑顺序）**
+
+在实现 B 轨前，先获取拓扑顺序：
+```
+unity-target-finder(
+  dumpCsPath: dumpDir + "/dump.cs",
+  outputPath: workDir + "/ordered_classes.json"
+)
+```
+B 轨类按此顺序实现，确保被依赖的底层类先完成。
+
+### 轨道 P 处理流程
+
+派发 `@unity-code-generator`，传入：
+- `className`、`projectDir`、`dumpDir`
+- `mode: "visual"`、`track: "P"`
+
+**P 轨规则**：P 轨任何类编译失败 → **立即 BLOCKED**，停止整流程，不走重试逻辑。
 
 ### 轨道 A 处理流程
 
@@ -307,7 +362,14 @@ LLM 从 dump.cs 推断合理实现，无需 IDA。
 - `blockKind: "missing_dll"`（缺第三方 DLL）→ **BLOCKED**，交 Stage 6 提取真实 DLL 后重试
 - 注意：`blockKind: "logic_unfixable"` **不是阻塞条件**——visual 模式下用更简单的合理实现重试一次
 
-每完成 5 个类，输出进度报告：
+每完成 10 个类，执行增量编译检查：
+```
+unity-editor-compile(projectPath: projectDir, timeout: 120)
+```
+- 0 错误 → 继续
+- 有错误 → 立即修复当前批次，修复超 3 次仍有同类错误 → **BLOCKED**
+
+每完成 10 个类，输出进度报告：
 ```
 进度：N/Total
   轨道 A 完成：X 个

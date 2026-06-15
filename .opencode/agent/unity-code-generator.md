@@ -63,6 +63,13 @@ unity-impl-command(
 
 若 `mode == "visual"`，跳过 Step 1.5（A1 精确解码）并在 Step 2 使用以下策略代替精确翻译铁律：
 
+#### visual + Track P（精确签名）
+严格按 dump.cs 签名生成，禁止推断：
+- 接口：所有方法体 `return default;`，不省略任何成员
+- 抽象基类：所有抽象方法体 `throw new NotImplementedException();`，非抽象方法调用 base
+- 编译失败直接返回 `status: "blocked"`（不走重试逻辑）
+- 自检：成员数量与 dump.cs 完全一致
+
 #### visual + Track A（资产驱动）
 只生成调用层，不做逻辑推断：
 - `Animator.SetTrigger("参数名")`、`animator.Play("状态名")`
