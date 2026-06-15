@@ -86,6 +86,13 @@ unity-impl-command(
 - 禁止空方法体，禁止 `throw NotImplementedException`
 - 自检：无空方法体 / 逻辑与方法名语义一致
 
+**Override 精确性铁律（B 轨最常见编译错误根源）**：
+- 若该类继承自抽象基类，必须从 dump.cs 读取基类的 **精确抽象方法签名**（返回类型、参数类型、参数名），不允许推断
+- 重点检查：返回类型是 `UniTask` 还是 `Task` 还是 `void`；参数是否有额外的 `CreationArgs`、`SaveArgs` 等类型
+- 检查步骤：先在 dump.cs 中搜索基类定义，把所有 `abstract` 方法的完整签名复制后再实现
+- 若 dump.cs 中找不到基类（在 DummyDll 里）：从 `<workDir>/abstract_signatures.json` 读取预提取的签名
+- 自检额外项：继承的方法签名与 dump.cs 基类签名完全一致（含返回类型）
+
 #### visual + Track C（代码动画）
 同 Track B 推断逻辑，额外规则：
 - DOTween 调用使用合理默认值：duration 0.2~0.5s、ease 按动画名推断（弹跳用 OutBounce，滑动用 OutQuad）

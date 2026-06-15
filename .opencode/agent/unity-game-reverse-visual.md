@@ -305,7 +305,33 @@ print(json.dumps(p, indent=2))
 
 **实现顺序：P 轨 → A 轨 → C 轨 → B 轨（B 轨按 unity-target-finder 拓扑顺序）**
 
-在实现 B 轨前，先获取拓扑顺序：
+### 前置步骤：抽象成员签名提取
+
+在实现任何类之前，先从 dump.cs 提取所有抽象基类/接口的精确成员签名，供后续类 override 使用：
+
+```bash
+python3 -c "
+import re, json
+
+dump = open('<dumpCsPath>').read()
+abstract_members = {}
+
+# 提取每个 abstract class 和 interface 的方法签名
+for cls_match in re.finditer(r'public (?:abstract )?(?:class|interface) (\w+).*?\n\{(.*?)\n\}', dump, re.DOTALL):
+    cls_name = cls_match.group(1)
+    body = cls_match.group(2)
+    methods = []
+    for m in re.finditer(r'(public (?:abstract |virtual |override )?[\w<>\[\], ]+? \w+\([^)]*\))', body):
+        methods.append(m.group(1).strip())
+    if methods:
+        abstract_members[cls_name] = methods
+
+json.dump(abstract_members, open('<workDir>/abstract_signatures.json', 'w'), indent=2)
+print(f'Extracted signatures for {len(abstract_members)} types')
+"
+```
+
+**在实现 B 轨前**，先获取拓扑顺序：
 ```
 unity-target-finder(
   dumpCsPath: dumpDir + "/dump.cs",
