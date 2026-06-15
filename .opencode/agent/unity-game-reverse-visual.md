@@ -395,18 +395,21 @@ GoogleMobileAds, Facebook, Nakama, Dreamteck Splines,
 Coffee.UIEffect, Coffee.UIParticle
 ```
 
-### Step 1：仅提取自有 DLL（排除黑名单）
+### Step 1：按脚本引用精确提取 DLL
 
-调用 `unity-dll-extract`，**只提取编译错误明确指名缺失的 DLL**，且排除黑名单中的名称：
+调用 `unity-dll-extract`，传入 `scriptsDir` 让工具扫描脚本 `using` 指令，**只提取脚本实际引用的 DLL**：
 ```
 unity-dll-extract(
   dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
   targetProjectPath: workDir + "/target_project",
-  onlyClasses: <仅填写编译错误指名缺失、且不在黑名单中的 DLL 名>
+  scriptsDir: workDir + "/target_project/Assets/Scripts"
 )
 ```
 
-若编译错误全部来自黑名单插件 → 跳过此步，在 Stage 7 报告中列出需要用户导入的插件清单。
+工具会自动：
+- 扫描所有 .cs 文件的 `using` 命名空间根前缀
+- 只提取命名空间前缀匹配的 DLL（排除 Firebase/AppsFlyer/MaxSdk 等脚本未 using 的纯 SDK）
+- 生成正确的 meta（`Any: enabled: 0` + `Editor: enabled: 1`，编译引用但不在 Editor 运行时加载）
 
 ### Step 2：GUID 重绑定
 
