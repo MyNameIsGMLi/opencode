@@ -261,3 +261,58 @@ unity-core-scene-finder(
 - 写入 `track_a_classes`、`track_b_classes`、`track_c_classes` 到状态文件
 - 写入 `<workDir>/core_classes.json`（全部三轨合并，每条记录含 `track` 字段）
 - 更新状态：`core_classes_confirmed: true`、`classes_total: N`、`completed_stages` 追加 `"stage4"`
+
+## Stage 5：三轨实现循环（表现优先，合理推断）
+
+读取 `<workDir>/core_classes.json`，过滤 `classes_done` 中已完成的类，对剩余每个类按轨道执行：
+
+### 轨道 A 处理流程
+
+派发 `@unity-code-generator`，传入：
+- `className`、`projectDir`、`dumpDir`
+- `mode: "visual"`、`track: "A"`
+
+只生成资产调用层，无需 IDA。
+
+### 轨道 B 处理流程
+
+派发 `@unity-code-generator`，传入：
+- `className`、`projectDir`、`dumpDir`
+- `mode: "visual"`、`track: "B"`
+
+LLM 从 dump.cs 推断合理实现，无需 IDA。
+
+### 轨道 C 处理流程
+
+1. 先以估算策略实现：
+   ```
+   @unity-code-generator(
+     className: className,
+     projectDir: projectDir,
+     dumpDir: dumpDir,
+     mode: "visual",
+     track: "C"
+   )
+   ```
+2. 编译成功后，将 `className` 追加到状态文件的 `pending_ida_refinement`
+3. 若 `ida_available: true` 且用户已发出补精指令：
+   - 派发 `@unity-ida-analyst` 获取该类全量伪代码
+   - 再次派发 `@unity-code-generator`（传入 `idaData`）用精确参数更新实现
+   - 从 `pending_ida_refinement` 移除该类
+
+### 所有轨道共同阻塞条件
+
+`@unity-code-generator` 返回 `status: "blocked"` 时：
+- `blockKind: "compile_failed"`（超限编译失败）→ **BLOCKED**，写入状态文件 `blocked` 字段，停止整流程，向用户报告
+- `blockKind: "missing_dll"`（缺第三方 DLL）→ **BLOCKED**，交 Stage 6 提取真实 DLL 后重试
+- 注意：`blockKind: "logic_unfixable"` **不是阻塞条件**——visual 模式下用更简单的合理实现重试一次
+
+每完成 5 个类，输出进度报告：
+```
+进度：N/Total
+  轨道 A 完成：X 个
+  轨道 B 完成：Y 个
+  轨道 C 完成：Z 个（其中 M 个已标记待 IDA 补精）
+```
+
+**Token 耗尽处理**：主动输出当前进度后提示用户重新调用，Agent 会从断点（`classes_done`）自动续传。
