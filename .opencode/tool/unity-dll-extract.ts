@@ -74,14 +74,22 @@ export default tool({
       }
     }
 
+    // DLL名→命名空间根的已知映射（DLL名与命名空间不一致时的补充）
+    const DLL_TO_NS_OVERRIDE: Record<string, string> = {
+      "UniTask": "Cysharp",
+      "UniTask.DOTween": "Cysharp",
+      "Il2CppDummyDll": "Il2CppDummyDll", // 基础依赖，始终保留
+    }
+
     // 按需过滤
     let targets = thirdParty
     if (referencedPrefixes) {
       targets = thirdParty.filter((f) => {
         const dllName = path.basename(f, ".dll")
-        // DLL 名的第一段（如 Crescive、Loom、UniTask）是命名空间根
+        // 优先查映射表，否则用 DLL 名的第一段作为命名空间根
+        const nsRoot = DLL_TO_NS_OVERRIDE[dllName] ?? dllName.split(".")[0]
         return [...referencedPrefixes!].some((ns) =>
-          ns.startsWith(dllName.split(".")[0]) || dllName.split(".")[0] === ns.split(".")[0]
+          ns === nsRoot || ns.startsWith(nsRoot + ".") || nsRoot.startsWith(ns + ".")
         )
       })
     }
