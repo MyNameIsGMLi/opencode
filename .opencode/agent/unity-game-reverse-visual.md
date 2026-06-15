@@ -199,3 +199,65 @@ permission:
 
 - `remaining_pink: 0` 且 `pipeline_aligned: true` → 更新状态，追加 `"stage3"`，进入 Stage 4。
 - 仍有粉红材质或管线无法对齐 → **BLOCKED**：报告残留粉红材质清单，停止。
+
+## Stage 4：核心场景定位 + 三轨分类
+
+**目的**：定位核心玩法场景，并将所有关键玩法类分配到三条实现轨道。
+
+### 4a. 定位核心玩法场景
+
+调用 `unity-core-scene-finder`：
+```
+unity-core-scene-finder(
+  sourceExportPath: workDir + "/source_export",
+  unpackedDataPath: workDir + "/il2cpp/unpacked/assets/bin/Data"
+)
+```
+
+从返回的关键玩法类清单开始三轨分类。
+
+### 4b. 三轨分类规则
+
+对每个关键玩法类，按以下规则分配轨道（优先级：C > A > B）：
+
+**轨道 A（资产驱动）** — 满足任一条件：
+- 字段类型含 `AnimationClip`、`AudioClip`、`ParticleSystem`、`Animator`、`AudioSource`
+- 类名含 `Sound`、`Audio`、`FX`、`Effect`、`VFX`、`Music`
+- 实现策略：只写调用层（SetTrigger/Play/Instantiate），无需逻辑推断
+- IDA：永不需要
+
+**轨道 B（结构推断）** — 不满足 A 轨或 C 轨的普通 MonoBehaviour：
+- 方法名和字段名足够推断行为意图
+- 实现策略：LLM 从 dump.cs 推断，合理估算允许，注释"estimated"
+- IDA：Play 后发现明显行为差距时按需启用
+
+**轨道 C（代码动画）** — 满足任一条件（优先判断）：
+- 字段类型含 `Sequence`、`Tweener`、`DOTweenAnimation`、`LTDescr`
+- 方法名含 `Tween`、`Animate`、`Ease`（纯代码驱动动画）
+- 实现策略：估算 DOTween/LeanTween 参数，注释"// estimated, refine with IDA"，追加到 `pending_ida_refinement`
+- IDA：实现后按需补精
+
+### 4c. 向用户展示分类结果并确认
+
+```
+核心玩法场景：<场景名>
+
+轨道 A（资产驱动，N 个）：
+  - SoundManager     [AudioSource 字段] → 只写调用层
+  - FXController     [ParticleSystem 字段] → 只写 Instantiate
+
+轨道 B（结构推断，N 个）：
+  - GameController   [MonoBehaviour，方法名语义清晰]
+  - ScoreUI          [UI 逻辑，字段足够推断]
+
+轨道 C（代码动画，N 个，实现后标记待 IDA 补精）：
+  - CardFlipManager  [Sequence 字段，DOTween]
+  - ComboEffectController  [方法名含 TweenScale]
+
+请回复"确认"，或告诉我需要调整的分类。
+```
+
+用户确认后：
+- 写入 `track_a_classes`、`track_b_classes`、`track_c_classes` 到状态文件
+- 写入 `<workDir>/core_classes.json`（全部三轨合并，每条记录含 `track` 字段）
+- 更新状态：`core_classes_confirmed: true`、`classes_total: N`、`completed_stages` 追加 `"stage4"`
