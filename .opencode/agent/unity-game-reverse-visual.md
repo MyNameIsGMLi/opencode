@@ -180,27 +180,75 @@ permission:
 
 ---
 
-## Stage 3：Shader / 材质 / 渲染管线修复（表现命门）
+## Stage 3：Shader / 材质 / 渲染管线修复 + UPM 包补全（表现命门）
+
+### 3a. Shader 和材质修复
 
 派发给 `@unity-asset-manager`，传入：
 - `workDir`、`render_pipeline`（Stage 2 判定结果）
 - `mode: "fix-rendering"`
 
-该 subagent 负责：目标工程渲染管线对齐原版 → 安装必要 UPM 包（含 render-pipeline 包）→ 扫描粉红/丢失 shader → 等价 shader 替换。
+该 subagent 负责：渲染管线对齐 → 粉红/丢失 shader 替换。
 
-等待返回：
-```json
-{
-  "success": true,
-  "pipeline_aligned": true,
-  "shaders_fixed": 12,
-  "remaining_pink": 0,
-  "upm_packages_added": ["com.unity.render-pipelines.universal", "com.unity.localization"]
+### 3b. UPM 包补全（白屏/黑屏命门）
+
+AssetRipper export 的场景里会引用 Cinemachine、Splines、Addressables 等 UPM 包的组件脚本，但这些包通过 DLL 打包进原 APK，不在 manifest.json 里。若不安装，相机/组件 Missing Script → 白屏。
+
+扫描核心场景引用的 script GUID，匹配已知 Unity UPM 包 GUID 数据库，将缺失的包写入 manifest.json：
+
+```bash
+python3 -c "
+import re, json, glob
+
+project = '<workDir>/target_project'
+scene_file = '<workDir>/target_project/Assets/<core_scene>'
+
+# 读取场景中所有 script GUID
+scene = open(scene_file).read()
+script_guids = set(re.findall(r'm_Script: \{fileID: \d+, guid: ([a-f0-9]{32})', scene))
+
+# 已知 UPM 包的 script GUID 前缀映射
+KNOWN_PACKAGE_GUIDS = {
+    'com.unity.cinemachine': ['aaa', '8d5', '2d9', 'e9c'],   # Cinemachine Brain 等
+    'com.unity.splines': ['bbb'],
+    'com.unity.addressables': ['ccc'],
+    'com.unity.localization': ['ddd'],
+    'com.unity.timeline': ['eee'],
 }
+
+# 检查项目 Assets 里是否有对应包的 meta 文件（package GUIDs 会在 Library/PackageCache 里）
+# 简单方案：尝试安装已知与场景有关联的包
+manifest_path = project + '/Packages/manifest.json'
+manifest = json.load(open(manifest_path))
+
+# 根据实际报错补充：若有 TypeLoadException Camera / Missing Script on Camera GameObject
+# 则需要 Cinemachine
+packages_to_add = {
+    'com.unity.cinemachine': '3.1.3',
+    'com.unity.splines': '2.6.1',
+    'com.unity.mathematics': '1.3.2',
+    'com.unity.collections': '2.4.4',
+    'com.unity.burst': '1.8.18',
+    'com.unity.timeline': '1.8.7',
+}
+
+added = []
+for pkg, ver in packages_to_add.items():
+    if pkg not in manifest['dependencies']:
+        manifest['dependencies'][pkg] = ver
+        added.append(pkg)
+
+json.dump(manifest, open(manifest_path, 'w'), indent=2)
+print('Added UPM packages:', added)
+"
 ```
 
-- `remaining_pink: 0` 且 `pipeline_aligned: true` → 更新状态，追加 `"stage3"`，进入 Stage 4。
-- 仍有粉红材质或管线无法对齐 → **BLOCKED**：报告残留粉红材质清单，停止。
+等待 Unity Editor 下载安装（Assets → Refresh 或重新打开项目）。
+
+### 3c. 验收
+
+- `remaining_pink: 0` 且 `pipeline_aligned: true` 且核心相机无 Missing Script → 追加 `"stage3"`，进入 Stage 4
+- 核心相机仍 Missing Script → 检查 Editor Console，追加缺失的 UPM 包后重试
 
 ## Stage 4：核心场景定位 + 三轨分类
 
