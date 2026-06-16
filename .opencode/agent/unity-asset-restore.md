@@ -57,6 +57,9 @@ permission:
   "unity_packages_added": [],
   "third_party_packages_pending": [],
   "placeholder_count": 0,
+  "dummy_shader_count": 0,
+  "dummy_shaders_by_plugin": {},
+  "material_serialization_fixed": 0,
   "blocked": null
 }
 ```
@@ -175,6 +178,72 @@ unity-shader-fix(
 - `remaining_pink: 0` 且 `pipeline_aligned: true` → 追加 `stage4`
 - 仍有粉红材质 → 写入 `blocked`，停止执行
 
+## Stage 4b：Dummy Shader 检测 + 材质序列化修复
+
+### 4b-1. 检测 DummyShaderTextExporter
+
+AssetRipper 无法导出 shader 的 HLSL 代码，所有 shader 都会生成带 `DummyShaderTextExporter` 标记的空壳文件，fragment 函数硬编码返回白色 `(1,1,1,1)`。需要识别并告知用户如何处理。
+
+```bash
+python3 -c "
+import re, glob
+from collections import defaultdict
+
+project = '<workDir>/target_project'
+dummy = []
+for shader in glob.glob(project + '/Assets/**/*.shader', recursive=True):
+    content = open(shader).read()
+    if 'DummyShaderTextExporter' in content:
+        dummy.append(shader.split('/Assets/')[-1])
+
+print(f'Dummy shader 数量: {len(dummy)}')
+for s in sorted(dummy):
+    print(f'  {s}')
+"
+```
+
+对每个 Dummy shader，判断它属于哪个第三方插件（通过名字前缀和路径），生成处理清单：
+
+**处理规则**：
+- **第三方插件 shader**（TCP2、PostProcessing Stack、TextMeshPro、Coffee.UI 等）：
+  - 如果用户已导入插件：在 Unity Editor 里用插件的 Shader Generator 重新生成，或让插件自动修复
+  - 如果未导入：列入"待用户导入"清单
+- **游戏自定义 shader**（非已知插件前缀）：
+  - 告知用户此 shader 无法自动恢复，需根据材质属性手写等价 shader 或用内置 shader 替换
+- **Hidden_PostProcessing_* 系列**：需要导入 PostProcessing Stack v2 包
+
+将检测结果记录到状态文件 `dummy_shaders`，在 Stage 6 报告中输出完整处理清单。
+
+### 4b-2. 材质属性序列化格式修复
+
+**背景**：AssetRipper 导出材质时，颜色属性（如 `_BaseColor`）会统一存入 `m_Colors` 段。但部分 shader（如 TCP2 Hybrid Shader 2）将 `_BaseColor` 声明为 `Vector` 类型而非 `Color` 类型。Unity 按类型查找属性：`Color` 类型从 `m_Colors` 读，`Vector` 类型从 `m_Vectors` 读，类型不匹配时使用 shader 默认值（通常是白色）。
+
+**检测**：对每个使用 Dummy shader 的材质，检查 shader Properties 块中各属性的声明类型，与材质文件的存储位置进行比对。
+
+**修复**：对类型不匹配的属性，在材质文件中将该属性从错误的段移到正确的段：
+
+```bash
+python3 -c "
+import re, glob
+
+project = '<workDir>/target_project'
+
+# 读取目标 shader 的属性类型声明
+# 例：_BaseColor (\"Color\", Color) → 存 m_Colors
+#     _BaseColor (\"Color\", Vector) → 存 m_Vectors
+
+# 对每个材质：检查 shader Properties 中属性类型 vs 材质中实际存储位置
+# 不匹配时移动到正确的段
+fixed = 0
+for mat in glob.glob(project + '/Assets/**/*.mat', recursive=True):
+    # [检测并修复逻辑]
+    pass
+print(f'修复材质: {fixed} 个')
+"
+```
+
+追加 `stage4b`，记录 `dummy_shader_count` 和 `material_serialization_fixed`。
+
 ## Stage 5：脚本占位 + 编译验证
 
 Phase 1 不需要任何真实逻辑脚本。为所有场景/Prefab 引用的 MonoBehaviour 生成空占位：
@@ -220,16 +289,31 @@ Phase 1 资源层验收报告
 核心场景：<scene>  渲染管线：<pipeline>（已对齐）
 粉红材质：0  Missing Script：0（占位脚本已覆盖）
 编译错误：0  占位脚本数量：N
+材质序列化修复：M 个
 
 Unity 官方包（已安装）：com.unity.cinemachine, ...
 第三方包（用户导入清单）：DOTween Pro, ...
 
+Dummy Shader 处理清单（共 X 个）：
+  需要插件支持（导入插件后可修复）：
+    - TCP2 Hybrid Shader 2 系列（N 个）→ Toony Colors Pro 2 插件
+        处理方式：导入插件后，在 Shader Generator 里选 BuiltIn 管线，重新 Generate
+    - Hidden_PostProcessing_* 系列（N 个）→ PostProcessing Stack v2
+        处理方式：Package Manager 安装 com.unity.postprocessing
+    - TextMeshPro_* 系列（N 个）→ TextMeshPro（通常已内置）
+        处理方式：Window → TextMeshPro → Import TMP Essential Resources
+  游戏自定义 Shader（无插件可用，需手动处理）：
+    - <ShaderName>（N 个材质使用）→ 建议替换为等价内置 shader
+
 Phase 1 产物说明：
   - Scripts/Placeholders/ 下的脚本是空占位，无任何逻辑
   - 所有游戏逻辑在 Phase 2 (unity-logic-rebuild) 中实现
+  - Dummy shader 材质在 Editor 中显示为白色，处理清单见上方
   - 当前工程可在 Editor 中打开查看场景，但点击 Play 不会有游戏行为
 
-下一步：运行 @unity-logic-rebuild 实现游戏逻辑
+下一步：
+  1. 按上方 Dummy Shader 清单处理第三方 shader
+  2. 运行 @unity-logic-rebuild 实现游戏逻辑
 ```
 
 **NOT-READY** → 写入 `blocked`，列出具体失败原因，停止执行。
