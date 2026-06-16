@@ -301,7 +301,8 @@ function convertClassToSkeleton(cls: ExtractedClass): string {
     // Fields: keep as-is (attributes + field declaration)
     if (line.match(/^\[/) || line.match(/^(public|private|protected|internal|static)\s.+;\s*(?:\/\/ 0x[0-9a-f]+)?$/)) {
       const cleanLine = line.replace(/\s*\/\/ 0x[0-9a-f]+$/, "").trim()
-      if (cleanLine && !cleanLine.startsWith("//")) {
+      // Skip compiler-generated backing fields like <PropName>k__BackingField - invalid C# source syntax
+      if (cleanLine && !cleanLine.startsWith("//") && !cleanLine.includes("<") && !cleanLine.includes(">")) {
         lines.push(`    ${cleanLine}`)
       }
       i++
