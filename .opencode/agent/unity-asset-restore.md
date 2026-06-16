@@ -75,6 +75,7 @@ permission:
 | blocked 非空 | 复述原因等待人工 |
 | 无 stage1 | Stage 1 |
 | 无 stage2 | Stage 2 |
+| 无 stage2b | Stage 2b |
 | 无 stage3 | Stage 3 |
 | 无 stage4 | Stage 4 |
 | 无 stage5 | Stage 5 |
@@ -134,6 +135,62 @@ GO → 构建目标工程骨架，然后搬运资产，追加 `stage2`：
    ```
 
 **NO-GO** → 写入 `blocked`（没有资产就没有表现，这是命门），停止执行。
+
+## Stage 2b：最小化 Library 初始化（首次打开工程）
+
+**背景**：Unity 6 在首次打开包含额外 UPM 包的工程时，Package Manager 下载包的过程中 GUISkin 资源尚未就绪，触发 `Failed to find default skin in editor resources!` 导致 Editor 崩溃退出（Unity 6.0.x 已知 bug）。
+
+**解决方案**：先用最小化 manifest（只有基础 modules）打开工程，等 Library 完整初始化后，再追加额外的 UPM 包。
+
+**步骤**：
+
+1. 将 `Packages/manifest.json` 临时设为最小版本（只保留 `com.unity.modules.*` + `com.unity.ugui` + `com.unity.textmeshpro`）：
+
+```bash
+python3 -c "
+import json
+path = '<workDir>/target_project/Packages/manifest.json'
+m = json.load(open(path))
+# 保存完整 manifest 备用
+import copy
+full = copy.deepcopy(m)
+json.dump(full, open(path + '.full_backup', 'w'), indent=2)
+
+# 设为最小 manifest
+minimal_deps = {k: v for k, v in m['dependencies'].items() 
+                if k.startswith('com.unity.modules.') 
+                or k in ['com.unity.ugui', 'com.unity.textmeshpro']}
+m['dependencies'] = minimal_deps
+json.dump(m, open(path, 'w'), indent=2)
+print('最小化 manifest 已写入')
+"
+```
+
+2. 同时将 `ProjectSettings/ProjectSettings.asset` 里的 `activeInputHandler` 设为 2（避免 Input System 弹窗）：
+
+```bash
+sed -i '' 's/  activeInputHandler: 0/  activeInputHandler: 2/' \
+  <workDir>/target_project/ProjectSettings/ProjectSettings.asset
+```
+
+3. 用 `unity-editor-compile` 等待 Library 初始化完成（首次可能需要 5-15 分钟）：
+
+```
+unity-editor-compile(
+  projectPath: workDir + "/target_project",
+  timeout: 900
+)
+```
+
+Library 初始化成功（编译通过）→ 追加 `stage2b`。
+失败 → 重试一次，仍失败 → 写入 `blocked`。
+
+4. 恢复完整 manifest（将 `manifest.json.full_backup` 内容写回 `manifest.json`）：
+
+```bash
+cp <workDir>/target_project/Packages/manifest.json.full_backup \
+   <workDir>/target_project/Packages/manifest.json
+```
 
 ## Stage 3：UPM 包检测 + 安装
 
