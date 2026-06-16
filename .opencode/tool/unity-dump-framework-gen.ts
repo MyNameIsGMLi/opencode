@@ -311,12 +311,27 @@ function convertClassToSkeleton(cls: ExtractedClass): string {
 
     // Method/property declarations: convert body to skeleton
     if (line.match(/^(public|private|protected|internal|override|virtual|abstract|static|new)\s/) && line.includes("(")) {
-      const methodLine = line.replace(/\s*\/\/ TypeDefIndex.*$/, "").trim()
+      let methodLine = line.replace(/\s*\/\/ TypeDefIndex.*$/, "").trim()
 
       // Skip IL constructors (.ctor) - they're not valid C# method names
       if (methodLine.includes(".ctor") || methodLine.includes(".cctor")) {
         i++
         continue
+      }
+
+      // Skip property accessor methods (get_X / set_X) - causes CS0082 duplicate accessor error
+      if (methodLine.match(/^(public|private|protected)\s.*\s(get_|set_)\w+\s*\(/)) {
+        i++
+        continue
+      }
+
+      // Replace external/unknown types in method signatures with 'object' to avoid CS0246
+      // Known external types that may not be in scope: UniTask, SaveArgs, CreationArgs, etc.
+      // Pattern: types that appear in return position or parameters but aren't C# primitives
+      const EXTERNAL_TYPES = ['UniTask', 'UniTaskVoid', 'SaveArgs', 'CreationArgs', 'CancellationToken']
+      for (const ext of EXTERNAL_TYPES) {
+        const regex = new RegExp(`\\b${ext}\\b`, 'g')
+        methodLine = methodLine.replace(regex, ext === 'UniTask' || ext === 'UniTaskVoid' ? 'System.Threading.Tasks.Task' : 'object')
       }
 
       if (cls.isInterface || line.includes("abstract ")) {
