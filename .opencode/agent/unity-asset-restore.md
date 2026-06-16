@@ -58,7 +58,10 @@ permission:
   "third_party_packages_pending": [],
   "placeholder_count": 0,
   "dummy_shader_count": 0,
-  "dummy_shaders_by_plugin": {},
+  "dummy_shader_class_a": [],
+  "dummy_shader_class_b": [],
+  "dummy_shader_class_c": [],
+  "dummy_shader_class_c_failed": [],
   "material_serialization_fixed": 0,
   "blocked": null
 }
@@ -178,71 +181,58 @@ unity-shader-fix(
 - `remaining_pink: 0` 且 `pipeline_aligned: true` → 追加 `stage4`
 - 仍有粉红材质 → 写入 `blocked`，停止执行
 
-## Stage 4b：Dummy Shader 检测 + 材质序列化修复
+## Stage 4b：Dummy Shader 检测 + 分类处理
 
-### 4b-1. 检测 DummyShaderTextExporter
+### 4b-1. 检测并分类所有 Dummy Shader
 
-AssetRipper 无法导出 shader 的 HLSL 代码，所有 shader 都会生成带 `DummyShaderTextExporter` 标记的空壳文件，fragment 函数硬编码返回白色 `(1,1,1,1)`。需要识别并告知用户如何处理。
+AssetRipper 无法导出 shader HLSL 代码，所有 shader 都会生成带 `DummyShaderTextExporter` 标记的空壳，fragment 函数硬编码返回白色 `(1,1,1,1)`。
 
-```bash
-python3 -c "
-import re, glob
-from collections import defaultdict
+扫描所有 `.shader` 文件，检测 Dummy，并按来源分为三类：
 
-project = '<workDir>/target_project'
-dummy = []
-for shader in glob.glob(project + '/Assets/**/*.shader', recursive=True):
-    content = open(shader).read()
-    if 'DummyShaderTextExporter' in content:
-        dummy.append(shader.split('/Assets/')[-1])
+**A 类：已知第三方插件 shader**（有插件可以恢复）
+- 识别规则：名称/路径前缀匹配已知插件
+  - `TCP2_*`, `Toony Colors Pro*` → Toony Colors Pro 2
+  - `Hidden_PostProcessing_*` → PostProcessing Stack v2
+  - `TextMeshPro*`, `Hidden_TextMeshPro*` → TextMeshPro
+  - `Coffee.UIEffect*`, `Hidden_UI_Default*` → Coffee.UIEffect
+  - `Resources/obimaterials/*` → Obi
+  - `Graphy_*` → Graphy
+- 处理方式：列入"待用户用插件恢复"清单，Phase 1 不自动处理
 
-print(f'Dummy shader 数量: {len(dummy)}')
-for s in sorted(dummy):
-    print(f'  {s}')
-"
-```
+**B 类：游戏自定义 shader，Properties 可推断功能**（自动替换）
+- 识别规则：非已知插件前缀，但 Properties 结构符合已知模式
+  - 有 `_MainTex + _Color`，无特殊属性 → 替换为 `Sprites/Default` 或 `Unlit/Texture`
+  - 有 `_MainTex + _Color + _Cutoff` → 替换为 `Unlit/Transparent Cutout`
+  - 有 `_BaseColor + _BaseMap` + 基础光照属性 → 替换为 `Standard`
+  - `additive/multiply/screen/overlay` 混合模式名称 → 替换为对应 UI/粒子内置 shader
+- **自动替换**：直接修改使用该 shader 的所有材质，将 `m_Shader` GUID 改为等价内置 shader
 
-对每个 Dummy shader，判断它属于哪个第三方插件（通过名字前缀和路径），生成处理清单：
-
-**处理规则**：
-- **第三方插件 shader**（TCP2、PostProcessing Stack、TextMeshPro、Coffee.UI 等）：
-  - 如果用户已导入插件：在 Unity Editor 里用插件的 Shader Generator 重新生成，或让插件自动修复
-  - 如果未导入：列入"待用户导入"清单
-- **游戏自定义 shader**（非已知插件前缀）：
-  - 告知用户此 shader 无法自动恢复，需根据材质属性手写等价 shader 或用内置 shader 替换
-- **Hidden_PostProcessing_* 系列**：需要导入 PostProcessing Stack v2 包
-
-将检测结果记录到状态文件 `dummy_shaders`，在 Stage 6 报告中输出完整处理清单。
+**C 类：游戏自定义 shader，Properties 无法推断**（IDA 分析）
+- 识别规则：非已知插件，Properties 结构复杂或有大量自定义参数，无法匹配已知模式
+- **自动触发 IDA 分析**：
+  1. 从游戏包的 assets 文件中定位该 shader 的编译 bytecode（ShaderBlob）
+  2. 提取 ForwardBase pass 的 fragment shader bytecode
+  3. 用 `spirv-cross` 或 Metal 反编译工具转成可读代码
+  4. 将反编译结果和 Properties 信息一起传给 `@unity-ida-analyst`
+  5. AI 根据反编译代码重建等价 HLSL，写入 shader 文件
+  6. 若 IDA 不可用或反编译失败：降级为 B 类处理（用 Standard 替换），并标记"待人工精化"
 
 ### 4b-2. 材质属性序列化格式修复
 
-**背景**：AssetRipper 导出材质时，颜色属性（如 `_BaseColor`）会统一存入 `m_Colors` 段。但部分 shader（如 TCP2 Hybrid Shader 2）将 `_BaseColor` 声明为 `Vector` 类型而非 `Color` 类型。Unity 按类型查找属性：`Color` 类型从 `m_Colors` 读，`Vector` 类型从 `m_Vectors` 读，类型不匹配时使用 shader 默认值（通常是白色）。
+**背景**：AssetRipper 导出材质时，颜色属性（如 `_BaseColor`）统一存入 `m_Colors` 段。但若 shader 将该属性声明为 `Vector` 类型（而非 `Color` 类型），Unity 会从 `m_Vectors` 读取，`m_Colors` 里的值被忽略，使用 shader 默认值（通常白色）。
 
-**检测**：对每个使用 Dummy shader 的材质，检查 shader Properties 块中各属性的声明类型，与材质文件的存储位置进行比对。
+**处理**：扫描每个材质使用的 shader 的 Properties 声明，对类型不匹配的属性自动修正存储位置：
+- shader 声明 `_Prop ("Name", Color)` 但材质存在 `m_Vectors` → 移到 `m_Colors`
+- shader 声明 `_Prop ("Name", Vector)` 但材质存在 `m_Colors` → 移到 `m_Vectors`
 
-**修复**：对类型不匹配的属性，在材质文件中将该属性从错误的段移到正确的段：
+适用于：已恢复的真实 shader（情况1处理完成后），以及 B 类自动替换后需要对齐的材质。
 
-```bash
-python3 -c "
-import re, glob
-
-project = '<workDir>/target_project'
-
-# 读取目标 shader 的属性类型声明
-# 例：_BaseColor (\"Color\", Color) → 存 m_Colors
-#     _BaseColor (\"Color\", Vector) → 存 m_Vectors
-
-# 对每个材质：检查 shader Properties 中属性类型 vs 材质中实际存储位置
-# 不匹配时移动到正确的段
-fixed = 0
-for mat in glob.glob(project + '/Assets/**/*.mat', recursive=True):
-    # [检测并修复逻辑]
-    pass
-print(f'修复材质: {fixed} 个')
-"
-```
-
-追加 `stage4b`，记录 `dummy_shader_count` 和 `material_serialization_fixed`。
+追加 `stage4b`，记录：
+- `dummy_shader_count`：总 Dummy shader 数
+- `dummy_shader_class_a`：A 类（插件，待用户处理）
+- `dummy_shader_class_b`：B 类（自动替换完成）
+- `dummy_shader_class_c`：C 类（IDA 分析）
+- `material_serialization_fixed`：序列化格式修复的材质数
 
 ## Stage 5：脚本占位 + 编译验证
 
@@ -295,15 +285,21 @@ Unity 官方包（已安装）：com.unity.cinemachine, ...
 第三方包（用户导入清单）：DOTween Pro, ...
 
 Dummy Shader 处理清单（共 X 个）：
-  需要插件支持（导入插件后可修复）：
-    - TCP2 Hybrid Shader 2 系列（N 个）→ Toony Colors Pro 2 插件
-        处理方式：导入插件后，在 Shader Generator 里选 BuiltIn 管线，重新 Generate
+
+  A 类 - 需要插件恢复（用户操作）：
+    - TCP2 Hybrid Shader 2 系列（N 个）→ Toony Colors Pro 2
+        导入插件后在 Shader Generator 里选 BuiltIn 管线重新 Generate
     - Hidden_PostProcessing_* 系列（N 个）→ PostProcessing Stack v2
-        处理方式：Package Manager 安装 com.unity.postprocessing
-    - TextMeshPro_* 系列（N 个）→ TextMeshPro（通常已内置）
-        处理方式：Window → TextMeshPro → Import TMP Essential Resources
-  游戏自定义 Shader（无插件可用，需手动处理）：
-    - <ShaderName>（N 个材质使用）→ 建议替换为等价内置 shader
+        Package Manager 安装 com.unity.postprocessing
+    - TextMeshPro_* 系列（N 个）→ Window → TextMeshPro → Import TMP Essential Resources
+
+  B 类 - 已自动替换为等价内置 shader（N 个）：
+    - <ShaderName> → 替换为 <内置Shader>（N 个材质）
+
+  C 类 - 已通过 IDA 重建（N 个）：
+    - <ShaderName> → 已重建 HLSL，视觉效果可能与原版存在细微差异
+  C 类 - IDA 分析失败，已降级替换（N 个）：
+    - <ShaderName> → 已替换为 Standard，标记"待人工精化"
 
 Phase 1 产物说明：
   - Scripts/Placeholders/ 下的脚本是空占位，无任何逻辑
