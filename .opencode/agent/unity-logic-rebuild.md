@@ -132,17 +132,19 @@ unity-dump-framework-gen(
 )
 ```
 
-### 2c. 补充第三方库 DLL
+### 2c. 第三方库处理原则
 
-仅补充 using 引用到的第三方 DLL（Any platform: 0，Editor: 1）：
+**Phase 2 不向 Plugins 放入任何 DLL。**
 
-```
-unity-dll-extract(
-  dummyDllPath: workDir + "/il2cpp/dump_output/DummyDll",
-  targetProjectPath: workDir + "/target_project",
-  scriptsDir: workDir + "/target_project/Assets/Scripts"
-)
-```
+原因：
+- 游戏自有框架（Crescive/Loom）→ 已在 2a 以 C# 源码形式导入，无需 DLL
+- 第三方商业库（DOTween/UniTask/Odin 等）→ IL2CPP stripped 版放入 Plugins 会导致 Editor 加载失败（TypeLoadException），必须由用户自行从 Asset Store / GitHub 导入完整版
+- 不得调用 `unity-dll-extract`
+
+若编译时出现 `CS0246` 缺少类型错误：
+- 检查是哪个第三方库缺失
+- 在 Stage 5 验收报告的"待用户导入"清单中列出该库和获取地址
+- **不通过 DLL 解决，不阻塞流程**
 
 ### 2d. 框架层编译验证
 
@@ -275,6 +277,13 @@ GUID 重定向：M 个（占位 → 真实实现）
 
 待 IDA 精化（可选，共 K 个）：
   - ClassName.MethodName() — 描述为何需要精化
+
+需要用户手动导入的第三方库（共 N 个）：
+这些库在代码中被引用，但必须由用户从 Asset Store / GitHub 获取完整版本：
+  - DOTween Pro → https://assetstore.unity.com/packages/tools/animation/dotween-hotween-v2-27676
+  - Odin Inspector → https://assetstore.unity.com/packages/tools/utilities/odin-inspector-and-serializer-89041
+  - UniTask → https://github.com/Cysharp/UniTask
+  注意：不要从 DummyDll 提取这些库的 stripped DLL，放入 Plugins 会导致 Editor 崩溃
 
 下一步：在 Unity Editor 中 Play 验收，或使用 @unity-ida-analyst 精化特定方法
 ```
