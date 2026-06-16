@@ -110,14 +110,20 @@ IDA 是按需工具，不自动触发。完成 Phase 2 后，用户可通过对�
 
 ### 2a. 复制 AssetRipper C# 源码
 
+**只复制 `Assembly-CSharp` 目录**——这是 AssetRipper 将游戏自身代码（含 Crescive/Loom 框架和游戏逻辑）统一导出的目录，是唯一可信的 C# 源码来源。
+
+**严禁**用 `^Crescive\.`、`^Loom\.` 或其他模式批量复制顶层目录——AssetRipper export 顶层目录包含大量第三方库的 IL2CPP stripped C# 源码（DOTween、UniTask、Sirenix、Firebase 等），这些源码有循环依赖，放入工程会导致 `CS0101` 重复定义和编译失败。
+
 ```bash
 SRC="<workDir>/source_export/ExportedProject/Assets/Scripts"
 DST="<workDir>/target_project/Assets/Scripts"
-for dir in $(ls "$SRC" | grep -E "^Crescive\.|^Loom\."); do
-  cp -R "$SRC/$dir" "$DST/$dir"
-  [ -f "$SRC/${dir}.meta" ] && cp "$SRC/${dir}.meta" "$DST/${dir}.meta"
-done
+
+# 只复制 Assembly-CSharp（游戏自身代码的唯一可信来源）
+cp -R "$SRC/Assembly-CSharp" "$DST/Assembly-CSharp"
+[ -f "$SRC/Assembly-CSharp.meta" ] && cp "$SRC/Assembly-CSharp.meta" "$DST/Assembly-CSharp.meta"
 ```
+
+若编译时有其他目录缺失导致 `CS0246`，先检查 `Assembly-CSharp` 里是否已包含该命名空间，再决定是否补充——**不得复制顶层的第三方库目录**。
 
 ### 2b. 修复泛型类型
 
@@ -160,6 +166,18 @@ unity-editor-compile(projectPath: workDir + "/target_project", timeout: 300)
 ---
 
 ## Stage 3：游戏逻辑实现
+
+### Scripts 目录边界（铁律）
+
+**只有以下内容允许存在于 `Assets/Scripts/`：**
+- `Assembly-CSharp/`（Stage 2a 复制的，含游戏逻辑和框架）
+- `CresciveGenericStubs/`（Stage 2b 生成的泛型修复）
+- `Placeholders/`（Phase 1 生成的占位，Stage 4 GUID 重定向后可删除）
+
+**绝对禁止复制进 Scripts/ 的目录（会导致 CS0101 重复定义和循环依赖）：**
+- AssetRipper export 顶层的 `Crescive.*`、`Loom.*` 目录（与 Assembly-CSharp 内同名类重复）
+- 任何第三方库目录（DOTween、UniTask、Sirenix、Firebase、MaxSdk 等）
+- 这些在 export 里是 IL2CPP stripped 版，不可用
 
 ### 确定实现顺序
 
