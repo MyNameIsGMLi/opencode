@@ -86,6 +86,7 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
     const listenerUrl = makeURL(opts.hostname, address.port)
     const unpublishMdns = yield* setupMdns(opts, address.port, state.scope)
     url = listenerUrl
+    process.env["OPENCODE_SERVER_URL"] = listenerUrl.toString()
 
     return {
       hostname: opts.hostname,
@@ -176,7 +177,10 @@ function makeStop(state: ListenerState, unpublishMdns: Effect.Effect<void>, list
         Effect.ignore,
         Effect.ensuring(
           Effect.sync(() => {
-            if (url === listenerUrl) url = undefined
+            if (url === listenerUrl) {
+              url = undefined
+              delete process.env["OPENCODE_SERVER_URL"]
+            }
           }),
         ),
       ),
