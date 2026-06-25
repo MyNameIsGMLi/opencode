@@ -184,6 +184,9 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  model_selector_enabled: Schema.optional(Schema.Boolean).annotate({
+    description: "Enable automatic model selection based on task complexity (default: false)",
+  }),
 }).annotate({ identifier: "Config" })
 
 export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>

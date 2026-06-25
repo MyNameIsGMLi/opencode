@@ -2069,6 +2069,7 @@ export type Config = {
     mcp_timeout?: number
     policies?: Array<ConfigV2ExperimentalPolicy>
   }
+  model_selector_enabled?: boolean
 }
 
 export type Model = {

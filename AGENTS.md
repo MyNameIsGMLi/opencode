@@ -1,3 +1,20 @@
+## Claim Verification Checklist
+
+Before stating any conclusion, asserting something works, or making any factual claim about code behavior, ALL of the following must be checked:
+
+| # | Gate | Must Have |
+|---|------|-----------|
+| 1 | **Evidence exists** | A running result, test output, or known-working code reference — not type inference or reasoning alone |
+| 2 | **All input branches covered** | Every possible value (`true`/`false`/`undefined`/`null`/error/missing) enumerated and accounted for |
+| 3 | **Runtime ≠ type** | "Property exists on the type" does not mean "call succeeds at runtime" — verified separately |
+| 4 | **Reference before derivation** | Found an existing working usage in the codebase first; did not derive a new call path from scratch |
+| 5 | **Root cause, not symptom** | The underlying cause is identified and fixed, not just the visible error message |
+| 6 | **Errors are not silently ignored** | Every tool call failure, unexpected output, or exception is explicitly acknowledged before continuing |
+| 7 | **Each reasoning step has evidence** | In a chain A→B→C, every intermediate step is verified, not just the endpoints |
+| 8 | **No partial verification claimed as full** | "Tested the happy path" is not "it works" — edge cases and failure paths are tested too |
+
+If any gate is not met: **downgrade the claim to an explicit assumption and say so.** Do not present unverified conclusions as facts.
+
 - To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.

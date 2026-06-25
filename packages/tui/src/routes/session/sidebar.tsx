@@ -142,9 +142,15 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>
                 花费: <span style={{ fg: theme.success }}>{moneyFormat.format(stats().cost)}</span>
               </text>
-              <text fg={theme.textMuted}>
-                消息: <span style={{ fg: theme.text }}>{stats().messages}</span> 条
-              </text>
+                <text fg={theme.textMuted}>
+                  消息: <span style={{ fg: theme.text }}>{stats().messages}</span> 条
+                </text>
+                <text fg={theme.textMuted}>
+                  自动模型选择:{" "}
+                  <span style={{ fg: sync.data.config.model_selector_enabled ? theme.success : theme.error }}>
+                    {sync.data.config.model_selector_enabled ? "开启" : "关闭"}
+                  </span>
+                </text>
               <Show when={routedModelName()}>
                 <text fg={theme.textMuted}>
                   模型: <span style={{ fg: theme.text }}>{routedModelName()}</span>
