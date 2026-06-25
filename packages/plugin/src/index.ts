@@ -229,7 +229,8 @@ export interface Hooks {
   auth?: AuthHook
   provider?: ProviderHook
   /**
-   * Called when a new message is received
+   * Called when a new message is received.
+   * Set `output.model` to override the model used for this message.
    */
   "chat.message"?: (
     input: {
@@ -239,7 +240,7 @@ export interface Hooks {
       messageID?: string
       variant?: string
     },
-    output: { message: UserMessage; parts: Part[] },
+    output: { message: UserMessage; parts: Part[]; model?: { providerID: string; modelID: string } },
   ) => Promise<void>
   /**
    * Modify parameters sent to LLM

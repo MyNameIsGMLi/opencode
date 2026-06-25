@@ -1029,7 +1029,7 @@ export const layer = Layer.effect(
         Effect.map((x) => x.flat().map(assign)),
       )
 
-      yield* plugin.trigger(
+      const chatMessageResult = yield* plugin.trigger(
         "chat.message",
         {
           sessionID: input.sessionID,
@@ -1038,8 +1038,15 @@ export const layer = Layer.effect(
           messageID: input.messageID,
           variant: input.variant,
         },
-        { message: info, parts: resolvedParts },
+        { message: info, parts: resolvedParts, model: undefined as { providerID: string; modelID: string } | undefined },
       )
+      if (chatMessageResult.model) {
+        info.model = {
+          providerID: ProviderV2.ID.make(chatMessageResult.model.providerID),
+          modelID: ModelV2.ID.make(chatMessageResult.model.modelID),
+          variant: info.model.variant,
+        }
+      }
 
       const parts = yield* Effect.forEach(resolvedParts, (part) =>
         part.type === "file" && part.mime.startsWith("image/")

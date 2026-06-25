@@ -9,7 +9,7 @@ import { usePluginRuntime } from "../../plugin/runtime"
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
 import { ModelCostDisplay } from "../../component/model-cost-display"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 
 const moneyFormat = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -32,7 +32,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
 
   const stats = createMemo(() => {
     const s = sync.session.get(props.sessionID)
-    if (!s) return { tokens: 0, cost: 0, messages: 0 }
+    if (!s) return { tokens: 0, cost: 0, messages: 0, routedModel: undefined as { providerID: string; modelID: string } | undefined }
 
     const parentID = s.parentID ?? s.id
     const family = sync.data.session.filter((x) => x.id === parentID || x.parentID === parentID)
@@ -40,6 +40,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     let totalTokens = 0
     let totalCost = 0
     let totalMessages = 0
+    let routedModel: { providerID: string; modelID: string } | undefined
 
     for (const session of family) {
       totalCost += session.cost ?? 0
@@ -55,9 +56,20 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
             msg.tokens.cache.write
           totalMessages++
         }
+        if (m.role === "user") {
+          const msg = m as UserMessage
+          if (msg.model) routedModel = msg.model
+        }
       }
     }
-    return { tokens: totalTokens, cost: totalCost, messages: totalMessages }
+    return { tokens: totalTokens, cost: totalCost, messages: totalMessages, routedModel }
+  })
+
+  const routedModelName = createMemo(() => {
+    const m = stats().routedModel
+    if (!m) return undefined
+    const provider = sync.data.provider.find((p) => p.id === m.providerID)
+    return provider?.models[m.modelID]?.name ?? m.modelID
   })
 
   return (
@@ -133,6 +145,11 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>
                 消息: <span style={{ fg: theme.text }}>{stats().messages}</span> 条
               </text>
+              <Show when={routedModelName()}>
+                <text fg={theme.textMuted}>
+                  模型: <span style={{ fg: theme.text }}>{routedModelName()}</span>
+                </text>
+              </Show>
             </box>
 
             <ModelCostDisplay sessionID={props.sessionID} />
