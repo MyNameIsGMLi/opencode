@@ -213,6 +213,11 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         )
       }
     },
+
+    // 向 bash 工具注入 server URL，使 slash 命令能直接调用 server HTTP API
+    "shell.env": async (_incoming, output) => {
+      output.env["OPENCODE_SERVER_URL"] = input.serverUrl.toString()
+    },
   }
 }
 
