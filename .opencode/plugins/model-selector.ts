@@ -155,8 +155,8 @@ const sessionState = new Map<string, { tier: TierKey; failCount: number }>()
 const server = async (input: PluginInput): Promise<Hooks> => {
   return {
     "chat.message": async (incoming, output) => {
-      // ① 实时读取配置开关，未设置或显式关闭时跳过
-      const globalConfig = await input.client.config.get()
+      // ① 实时读取全局配置开关（每次调用都会绕过缓存读取最新文件）
+      const globalConfig = await input.client.global.config.get()
       if (globalConfig.data?.model_selector_enabled !== true) return
 
       // ② 只在 build（默认）agent 下生效
