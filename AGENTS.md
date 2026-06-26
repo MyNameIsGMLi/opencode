@@ -15,6 +15,26 @@ Before stating any conclusion, asserting something works, or making any factual 
 
 If any gate is not met: **downgrade the claim to an explicit assumption and say so.** Do not present unverified conclusions as facts.
 
+### Mandatory Execution Protocol
+
+This checklist is NOT a passive reference. It MUST be executed explicitly before every conclusion.
+
+**Before any of the following actions — committing code, saying "fixed", "works", "done", or "verified" — you MUST output the checklist result in this exact format:**
+
+```
+Verification:
+1. Evidence exists: ✓ [what evidence] / ✗ ASSUMPTION — [state it explicitly]
+2. All branches covered: ✓ / ✗ ASSUMPTION
+3. Runtime ≠ type: ✓ / ✗ ASSUMPTION
+4. Reference before derivation: ✓ / ✗ ASSUMPTION
+5. Root cause, not symptom: ✓ / ✗ ASSUMPTION
+6. Errors not silently ignored: ✓ / ✗ ASSUMPTION
+7. Each step has evidence: ✓ / ✗ ASSUMPTION
+8. No partial claimed as full: ✓ / ✗ ASSUMPTION
+```
+
+If you skip this output, you are violating this rule. There are no exceptions — not for simple changes, not under time pressure, not when typecheck passes.
+
 - To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
