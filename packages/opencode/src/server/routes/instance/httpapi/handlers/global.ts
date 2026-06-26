@@ -80,6 +80,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
+      yield* config.invalidate()
       return yield* config.getGlobal()
     })
 
