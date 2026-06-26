@@ -10,6 +10,8 @@
  *   3. 连续失败：检测到错误关键词时逐级升 tier，最高升到 D
  */
 import type { PluginInput, Hooks } from "@opencode-ai/plugin"
+import { readFile } from "fs/promises"
+import { existsSync } from "fs"
 
 // ── Tier 顺序（用于逐级升级）────────────────────────────────────────────────
 const TIER_ORDER = ["A", "B", "C", "D"] as const
@@ -155,9 +157,22 @@ const sessionState = new Map<string, { tier: TierKey; failCount: number }>()
 const server = async (input: PluginInput): Promise<Hooks> => {
   return {
     "chat.message": async (incoming, output) => {
-      // ① 实时读取全局配置开关（每次调用都会绕过缓存读取最新文件）
-      const globalConfig = await input.client.global.config.get()
-      if (globalConfig.data?.model_selector_enabled !== true) return
+      // ① 直接读取全局配置文件，绕过所有缓存
+      const configCandidates = ["opencode.jsonc", "opencode.json", "config.json"].map(
+        (f) => `${process.env.HOME}/.config/opencode/${f}`,
+      )
+      let modelSelectorEnabled = false
+      for (const filepath of configCandidates) {
+        if (existsSync(filepath)) {
+          try {
+            const text = await readFile(filepath, "utf-8")
+            const json = JSON.parse(text.replace(/\/\/[^\n]*/g, "").replace(/,\s*([}\]])/g, "$1"))
+            modelSelectorEnabled = json.model_selector_enabled === true
+          } catch {}
+          break
+        }
+      }
+      if (!modelSelectorEnabled) return
 
       // ② 只在 build（默认）agent 下生效
       if (incoming.agent && incoming.agent !== "build") return
