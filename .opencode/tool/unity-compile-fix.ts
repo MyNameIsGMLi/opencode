@@ -124,20 +124,27 @@ export default tool({
       }
     }
 
-    // ── Step 3: 超出迭代上限 ─────────────────────────────────────────
+    // ── Step 3: 超出迭代上限 → BLOCKED（零降级，绝不放行）──────────────
     if (iteration >= maxIterations) {
+      const remaining = compileResult.errors ?? []
+      const hasThirdParty = remaining.some((e: any) => isThirdPartyError(e.message))
       return {
-        status: "gave_up",
+        status: "blocked",
+        blocked: true,
+        blockKind: hasThirdParty ? "missing_dll" : "logic_unfixable",
         iteration,
         output: [
-          `⚠️ 达到最大迭代次数 (${maxIterations})，仍有 ${compileResult.errors?.length ?? 0} 个错误。`,
+          `⛔ BLOCKED：达到最大迭代次数 (${maxIterations})，仍有 ${remaining.length} 个错误，交人工处理。`,
+          hasThirdParty
+            ? `  （含第三方/缺失 DLL 错误，可尝试 Stage 6 DLL 提取后重试）`
+            : `  （核心代码逻辑错误，零降级铁律：绝不放行带错代码，需人工修正）`,
           ``,
-          `剩余错误（需人工处理）:`,
-          ...(compileResult.errors ?? []).slice(0, 10).map((e: any) =>
+          `剩余错误:`,
+          ...remaining.slice(0, 10).map((e: any) =>
             `  ${e.file}(${e.line}): ${e.code}: ${e.message}`
           ),
         ].join("\n"),
-        remainingErrors: compileResult.errors ?? [],
+        remainingErrors: remaining,
       }
     }
 
@@ -147,19 +154,21 @@ export default tool({
     const skippedErrors = allErrors.filter((e: any) => isThirdPartyError(e.message))
     const fixableErrors = allErrors.filter((e: any) => !isThirdPartyError(e.message))
 
-    // 全部是第三方错误，无法自动修复
+    // 全部是第三方错误 → BLOCKED（missing_dll）：交 Stage 6 提取真实 DLL，绝不用空 stub 蒙混
     if (fixableErrors.length === 0 && skippedErrors.length > 0) {
       return {
-        status: "needs_manual",
+        status: "blocked",
+        blocked: true,
+        blockKind: "missing_dll",
         iteration,
         output: [
-          `⚠️ 所有错误均为第三方插件/缺失依赖，需手动处理:`,
+          `⛔ BLOCKED：所有错误均为第三方插件/缺失 DLL，需 Stage 6 从 DummyDll/Managed 提取真实 DLL：`,
           ``,
           ...skippedErrors.slice(0, 10).map((e: any) =>
             `  ${e.file}(${e.line}): ${e.code}: ${e.message}`
           ),
           ``,
-          `建议: 确认相关插件已正确安装，或在代码中添加条件编译 #if 指令。`,
+          `零降级铁律：必须提供真实 DLL（Assets/Plugins/），严禁用空 stub 类/条件编译规避。`,
         ].join("\n"),
         skippedErrors,
       }
@@ -174,10 +183,13 @@ export default tool({
 
     if (history.includes(currentSignature)) {
       return {
-        status: "stuck",
+        status: "blocked",
+        blocked: true,
+        blockKind: "logic_unfixable",
         iteration,
         output: [
-          `🔄 检测到死循环：同一组错误连续出现 2 次，自动修复策略失效，需要人工介入。`,
+          `⛔ BLOCKED：检测到死循环（同一组错误连续出现 2 次），自动修复策略失效，需人工介入。`,
+          `  零降级铁律：绝不放行带错代码，绝不写占位绕过。`,
           ``,
           `卡住的错误:`,
           ...fixableErrors.slice(0, 5).map((e: any) =>

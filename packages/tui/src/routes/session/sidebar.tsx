@@ -1,6 +1,6 @@
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
-import { createMemo, Show } from "solid-js"
+import { createMemo, createSignal, onCleanup, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../config"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -16,12 +16,30 @@ const moneyFormat = new Intl.NumberFormat("en-US", {
   currency: "USD",
 })
 
+// 直接读配置文件，实时反映 model_selector_enabled 的变化
+function readModelSelectorEnabled(): boolean {
+  const home = (typeof process !== "undefined" && process.env.HOME) || ""
+  const candidates = [`${home}/.config/opencode/opencode.jsonc`, `${home}/.config/opencode/opencode.json`, `${home}/.config/opencode/config.json`]
+  for (const f of candidates) {
+    try {
+      // @ts-ignore — Bun/Node 环境下可用
+      const text = require("fs").readFileSync(f, "utf-8")
+      const json = JSON.parse(f.endsWith(".jsonc") ? text.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1") : text)
+      return json.model_selector_enabled === true
+    } catch {}
+  }
+  return false
+}
+
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const pluginRuntime = usePluginRuntime()
   const project = useProject()
   const sync = useSync()
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
+  const [modelSelectorEnabled, setModelSelectorEnabled] = createSignal(readModelSelectorEnabled())
+  const timer = setInterval(() => setModelSelectorEnabled(readModelSelectorEnabled()), 2000)
+  onCleanup(() => clearInterval(timer))
   const session = createMemo(() => sync.session.get(props.sessionID))
   const workspace = () => {
     const workspaceID = session()?.workspaceID
@@ -145,12 +163,12 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 <text fg={theme.textMuted}>
                   消息: <span style={{ fg: theme.text }}>{stats().messages}</span> 条
                 </text>
-                <text fg={theme.textMuted}>
-                  自动模型选择:{" "}
-                  <span style={{ fg: sync.data.config.model_selector_enabled ? theme.success : theme.error }}>
-                    {sync.data.config.model_selector_enabled ? "开启" : "关闭"}
-                  </span>
-                </text>
+              <text fg={theme.textMuted}>
+                自动模型选择:{" "}
+                <span style={{ fg: modelSelectorEnabled() ? theme.success : theme.error }}>
+                  {modelSelectorEnabled() ? "开启" : "关闭"}
+                </span>
+              </text>
               <Show when={routedModelName()}>
                 <text fg={theme.textMuted}>
                   模型: <span style={{ fg: theme.text }}>{routedModelName()}</span>

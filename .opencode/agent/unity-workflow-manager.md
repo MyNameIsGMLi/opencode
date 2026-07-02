@@ -30,7 +30,7 @@ permission:
 
 ## 执行顺序（严格顺序，前一步失败则停止）
 
-### Step 1：APK/IPA 解包
+### Step 1：APK/IPA/XAPK 解包（含分包合并）
 
 调用 `unity-unpack`：
 ```
@@ -40,16 +40,22 @@ unity-unpack(
 )
 ```
 
+`unity-unpack` 自动处理：
+- `.xapk` / `.xapk.zip` / 含多 APK 的 `.zip` → 识别为 XAPK，**自动合并** main APK（资源+metadata）与 config APK（libil2cpp.so 二进制）到同一目录。
+- 合并后若 IL2CPP 二进制或 metadata 缺失，工具会直接返回 `success: false, blocked: true`。
+
 从返回结果中提取：
 - `il2cpp`：libil2cpp.so 绝对路径
 - `metadata`：global-metadata.dat 绝对路径
 
-**验证**：两者必须存在，否则报错并停止，输出：
-```
-[Step 1 失败] 未找到 IL2CPP 二进制或 metadata 文件
-  il2cpp: <路径或 null>
-  metadata: <路径或 null>
-  建议：确认 APK 是 IL2CPP 打包的 Unity 游戏
+**零降级验证**：若返回 `blocked: true` 或两者任一缺失，**立即停止**，返回 BLOCKED 给主 Agent，**不得继续 Step 2**：
+```json
+{
+  "success": false,
+  "blocked": true,
+  "failed_step": "step1",
+  "reason": "<unity-unpack 返回的 reason>"
+}
 ```
 
 ### Step 2：Il2CppDumper 生成 DummyDll 和 dump.cs

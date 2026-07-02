@@ -10,8 +10,13 @@
  *   3. 连续失败：检测到错误关键词时逐级升 tier，最高升到 D
  */
 import type { PluginInput, Hooks } from "@opencode-ai/plugin"
-import { readFile } from "fs/promises"
+import { readFile, appendFile } from "fs/promises"
 import { existsSync } from "fs"
+
+const DEBUG_LOG = "/tmp/model-selector-debug.log"
+async function dbg(msg: string) {
+  await appendFile(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`)
+}
 
 // ── Tier 顺序（用于逐级升级）────────────────────────────────────────────────
 const TIER_ORDER = ["A", "B", "C", "D"] as const
@@ -157,6 +162,8 @@ const sessionState = new Map<string, { tier: TierKey; failCount: number }>()
 const server = async (input: PluginInput): Promise<Hooks> => {
   return {
     "chat.message": async (incoming, output) => {
+      await dbg(`hook triggered, agent=${incoming.agent}`)
+
       // ① 直接读取全局配置文件，绕过所有缓存
       const configCandidates = ["opencode.jsonc", "opencode.json", "config.json"].map(
         (f) => `${process.env.HOME}/.config/opencode/${f}`,
@@ -166,16 +173,28 @@ const server = async (input: PluginInput): Promise<Hooks> => {
         if (existsSync(filepath)) {
           try {
             const text = await readFile(filepath, "utf-8")
-            const json = JSON.parse(text.replace(/\/\/[^\n]*/g, "").replace(/,\s*([}\]])/g, "$1"))
+            // opencode.json は標準 JSON、opencode.jsonc のみ JSONC
+            const json = filepath.endsWith(".jsonc")
+              ? JSON.parse(text.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1"))
+              : JSON.parse(text)
             modelSelectorEnabled = json.model_selector_enabled === true
-          } catch {}
+            await dbg(`read ${filepath}, model_selector_enabled=${modelSelectorEnabled}`)
+          } catch (e) {
+            await dbg(`parse error: ${e}`)
+          }
           break
         }
       }
-      if (!modelSelectorEnabled) return
+      if (!modelSelectorEnabled) {
+        await dbg(`disabled, returning`)
+        return
+      }
 
       // ② 只在 build（默认）agent 下生效
-      if (incoming.agent && incoming.agent !== "build") return
+      if (incoming.agent && incoming.agent !== "build") {
+        await dbg(`agent=${incoming.agent} !== build, returning`)
+        return
+      }
 
       const parts = (output.parts ?? []) as Array<{ type: string; text?: string; mediaType?: string }>
       const text = getText(parts)
@@ -215,12 +234,17 @@ const server = async (input: PluginInput): Promise<Hooks> => {
       }
 
       const model = pickModel(baseTier, incoming.model?.providerID)
+      await dbg(`tier=${baseTier} tokens≈${estimateTokens(parts)} → picked=${model ? `${model.providerID}/${model.modelID}` : "none"}`)
       if (!model) return
 
       // 与当前模型一致时不覆盖
-      if (incoming.model?.providerID === model.providerID && incoming.model?.modelID === model.modelID) return
+      if (incoming.model?.providerID === model.providerID && incoming.model?.modelID === model.modelID) {
+        await dbg(`model same as current, not overriding`)
+        return
+      }
 
       output.model = model
+      await dbg(`set output.model=${model.providerID}/${model.modelID}`)
 
       if (process.env.OPENCODE_MODEL_SELECTOR_DEBUG === "1") {
         process.stderr.write(

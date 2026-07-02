@@ -764,6 +764,15 @@ export function judgeNeedsIDA(classChunk: any, allVerified: any[] = []): boolean
   if (keywords.some(k => k.test(name) || k.test(fullName))) return true
   if (complexity > 80) return true
   if (methodCount > 20) return true
+
+  // 规则 3.5（核心玩法判据）：IL2CPP dump 的方法体全空，玩法逻辑全在 RVA。
+  // 直接继承 MonoBehaviour / *Controller 的玩法类，且方法数有一定规模（非纯数据/UI 包装），
+  // 其行为逻辑必须靠 IDA 还原，否则只能生成空壳。宁可多取 IDA，不可漏取导致零逻辑实现。
+  // 注：RAG content 不含方法签名，故以 baseClass + methodCount 为可靠信号。
+  const baseClass = classChunk.metadata?.baseClass || ""
+  const isGameplayMono = /^(MonoBehaviour|BaseController)$|Controller$/.test(baseClass)
+  if (isGameplayMono && methodCount >= 5) return true
+
   // 规则4：同命名空间相似类已使用 IDA
   const ns = classChunk.metadata?.namespace
   return allVerified.some((v: any) => v.metadata?.namespace === ns && v.metadata?.usedIDA === true)

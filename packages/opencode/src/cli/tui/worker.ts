@@ -69,6 +69,8 @@ export const rpc = {
       }),
     )
   },
+
+
   async shutdown() {
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)

@@ -66,18 +66,30 @@ export default tool({
     // ==================== 阶段 1: 查找目标类 ====================
     log(`[1/6] 查找目标类: ${args.className}`)
 
-    const targetChunk = allClasses.find(
+    // 同名 chunk 可能有多个（主类 + 编译器生成的协程/闭包状态机如 <Method>d__N）。
+    // 必须选"主类"chunk：排除嵌套/状态机（baseClass 为 IEnumerator/IEnumerable 或名字带 <>），
+    // 在剩余中取方法数最多者（主类方法数远多于状态机）。
+    const candidates = allClasses.filter(
       (c: any) =>
         c.metadata.className === args.className ||
         c.metadata.fullName?.endsWith(`.${args.className}`),
     )
 
-    if (!targetChunk) {
+    if (candidates.length === 0) {
       return {
         error: `未找到类: ${args.className}`,
         suggestion: "请检查类名是否正确，或使用 search 操作查找",
       }
     }
+
+    const isStateMachine = (c: any) =>
+      /^IEnumerator|^IEnumerable/.test(c.metadata?.baseClass || "") ||
+      /[<>]|d__\d+|DisplayClass/.test(c.metadata?.fullName || "")
+    const mainCandidates = candidates.filter((c: any) => !isStateMachine(c))
+    const pool = mainCandidates.length > 0 ? mainCandidates : candidates
+    const targetChunk = pool.sort(
+      (a: any, b: any) => (b.metadata?.methodCount || 0) - (a.metadata?.methodCount || 0),
+    )[0]
 
     log(`✓ 找到: ${targetChunk.metadata.fullName}`)
 

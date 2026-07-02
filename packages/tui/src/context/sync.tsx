@@ -28,7 +28,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount, onCleanup } from "solid-js"
+import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
@@ -549,14 +549,6 @@ export const {
     onMount(() => {
       void bootstrap()
 
-      // 轮询全局配置，使 model_selector_enabled 等全局开关能在当前会话立即反映
-      const configPollTimer = setInterval(() => {
-        // 直接读取全局配置，不依赖 workspace
-        void sdk.client.global.config.get().then((x) => {
-          if (x.data) setStore("config", reconcile(x.data))
-        })
-      }, 2000)
-      onCleanup(() => clearInterval(configPollTimer))
     })
 
     const result = {

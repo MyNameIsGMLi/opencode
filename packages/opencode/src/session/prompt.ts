@@ -1074,7 +1074,7 @@ const layer = Layer.effect(
       }
 
       if (input.noReply === true) return message
-      return yield* loop({ sessionID: input.sessionID })
+      return yield* loop({ sessionID: input.sessionID, model: message.info.model })
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1085,8 +1085,8 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID) {
+    const runLoop: (sessionID: SessionID, overrideModel?: typeof ModelRef.Type) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
+      function* (sessionID: SessionID, overrideModel?: typeof ModelRef.Type) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
@@ -1145,7 +1145,9 @@ const layer = Layer.effect(
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          // 第一步时优先使用 plugin 覆盖的模型（overrideModel），避免事件异步写入 DB 导致读到旧值
+          const modelRef = step === 1 && overrideModel ? overrideModel : lastUser.model
+          const model = yield* getModel(modelRef.providerID, modelRef.modelID, sessionID)
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -1349,7 +1351,7 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID, input.model))
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
@@ -1528,6 +1530,7 @@ export type PromptInput = Schema.Schema.Type<typeof PromptInput>
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,
+  model: Schema.optional(ModelRef),
 }) {}
 
 export const ShellInput = Schema.Struct({

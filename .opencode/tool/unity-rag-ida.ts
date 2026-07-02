@@ -37,6 +37,11 @@ export default tool({
 
     maxClasses: tool.schema.number().optional().describe("最多分析多少个类（默认 50）"),
 
+    allMethods: tool.schema
+      .boolean()
+      .optional()
+      .describe("核心玩法类设 true：分析该类全部方法（逻辑 100% 完整），而非只挑高优先级前 3 个"),
+
     dryRun: tool.schema.boolean().optional().describe("仅显示计划，不实际调用 IDA"),
   },
 
@@ -184,8 +189,18 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
           continue
         }
 
+        // script.json 的方法名分隔符是 "$$"（如 "Brick$$MoveLeft"），
+        // 而 dump.cs 用 "::"。两种格式都兼容，且排除编译器生成的嵌套状态机（含 "<...>"）。
         const methods = scriptJson.ScriptMethod || []
-        const classMethods = methods.filter((m: any) => m.Name?.startsWith(classChunk.metadata.fullName + "::"))
+        const fullName = classChunk.metadata.fullName
+        const classMethods = methods.filter((m: any) => {
+          const n = m.Name || ""
+          const matchesClass =
+            n.startsWith(fullName + "$$") || n.startsWith(fullName + "::")
+          // 排除 "Brick.<ShowStopHighlight>d__40$$..." 这类协程状态机方法
+          const isNestedStateMachine = n.startsWith(fullName + ".<") || /\.<[^>]+>d__/.test(n)
+          return matchesClass && !isNestedStateMachine
+        })
 
         if (classMethods.length === 0) {
           results.push({ className, success: false, error: "未找到方法地址" })
@@ -193,28 +208,36 @@ ${targetClasses.map((c, i) => `${i + 1}. ${c}`).join("\n")}
           continue
         }
 
-        // 按优先级智能选择方法（生命周期 > 业务逻辑关键词 > 参数复杂度）
-        const methodsToAnalyze = selectMethodsForIDA(classMethods).length > 0
-          ? selectMethodsForIDA(classMethods)
-          : classMethods.slice(0, 3)  // 兜底：若无高优先级方法取前3个
+        // allMethods=true（核心玩法类）：分析全部方法，确保逻辑 100% 完整，不漏任何方法。
+        // 否则按优先级智能选择（生命周期 > 业务逻辑关键词 > 参数复杂度），兜底前 3 个。
+        const methodsToAnalyze = args.allMethods
+          ? classMethods
+          : selectMethodsForIDA(classMethods).length > 0
+            ? selectMethodsForIDA(classMethods)
+            : classMethods.slice(0, 3)
         const pseudocodeList: string[] = []
 
         for (const method of methodsToAnalyze) {
           const address = method.Address
           if (!address || address === "0x0") continue
 
+          // IDA RPC 协议：{"methods":[{"address":<十进制int>}]}，地址必须是十进制数字（非 0x 字符串）。
+          // 响应：{"results":[{"code":"...","success":true}]}。
+          const addrInt = typeof address === "string" ? parseInt(address, 16) : address
           try {
             const decompileResult = await ctx.bash(
-              `curl -s -X POST ${idaRpcUrl}/decompile -H "Content-Type: application/json" -d '{"address": "${address}"}' -m 30`,
+              `curl -s -X POST ${idaRpcUrl}/decompile -H "Content-Type: application/json" -d '{"methods": [{"method_name": ${JSON.stringify(method.Name)}, "address": ${addrInt}}]}' -m 60`,
             )
 
-            const result = JSON.parse(decompileResult)
-
-            if (result.pseudocode || result.code) {
-              pseudocodeList.push(`// ${method.Name}\n${result.pseudocode || result.code}`)
+            const parsed = JSON.parse(decompileResult)
+            const entry = parsed.results?.[0]
+            const code = entry?.code || entry?.pseudocode
+            if (entry?.success && code && !/^\/\/ ERROR/.test(code)) {
+              pseudocodeList.push(`// ${method.Name}\n${code}`)
+            } else {
+              pseudocodeList.push(`// ${method.Name}\n// IDA 分析失败: ${entry?.code || "无结果"}`)
             }
           } catch (error) {
-            // 单个方法失败不影响整体
             pseudocodeList.push(`// ${method.Name}\n// IDA 分析失败`)
           }
 

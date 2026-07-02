@@ -206,84 +206,101 @@ function buildArchDiagram(modules: Map<string, ClassChunk[]>): string {
   return lines.join("\n")
 }
 
-// ── 核心玩法方案文档 ─────────────────────────────────────────────────
+// ── 核心玩法学习文档骨架 ─────────────────────────────────────────────────
+//
+// 设计原则：真正的"玩法学习材料"（玩法怎么设计/详细逻辑/表现对应）需要 AI 基于
+// IDA+代码+精确数值深度理解后撰写，工具无法自动生成深度内容。
+// 因此本函数产出**结构化骨架 + 真实数据钩子 + 待 AI 填充的深度解析标记**，
+// 由 code-generator/分析流程在阶段 B 填充每个 <!-- AI填充 --> 章节的真实玩法解析。
 
 function buildGameplayDoc(classChunks: ClassChunk[], verifiedChunks: ClassChunk[]): string {
   const verifiedMap = new Map(verifiedChunks.map(c => [c.metadata.className, c]))
+  const verified = classChunks.filter(c => verifiedMap.has(c.metadata.className))
 
-  // 游戏类：继承自 GAME_BASE_CLASSES 且类名有业务含义
-  const kw = /Controller|Manager|System|Game|Player|Battle|Combat|Skill|Level|Stage|Wave|Enemy|Spawn|UI|HUD|View|Feature/i
-  const coreClasses = classChunks.filter(c => isGameClass(c) && kw.test(c.metadata.className ?? ""))
-
-  const groups: Array<{ name: string; pattern: RegExp | null; classes: ClassChunk[] }> = [
-    { name: "GameFlow（主流程）", pattern: /Game|Level|Stage|Wave|Spawn/i, classes: [] },
-    { name: "核心玩法", pattern: /Combat|Battle|Skill|Attack|Damage|Weapon|Projectile/i, classes: [] },
-    { name: "Player（玩家）", pattern: /Player|Character/i, classes: [] },
-    { name: "UI（界面）", pattern: /UI|HUD|Panel|Menu|Screen|View|Display/i, classes: [] },
-    { name: "其他系统", pattern: null, classes: [] },
-  ]
-
-  for (const c of coreClasses) {
-    const mi = groups.slice(0, -1).findIndex(g => g.pattern!.test(c.metadata.className ?? ""))
-    groups[mi === -1 ? groups.length - 1 : mi].classes.push(c)
-  }
-
-  const lines = [
-    "# 核心玩法方案",
+  const lines: string[] = [
+    "# 核心玩法解析",
     "",
-    `> 自动分析自 IL2CPP dump.cs，共识别 ${coreClasses.length} 个核心玩法类`,
+    "> 学习材料：玩法机制 + 详细逻辑流程（含精确数值）+ 逻辑↔表现对应。",
+    "> 代码佐证位于 `Assets/Scripts/Generated/`，文档与代码逐点交叉引用（`类名.cs:行号`）。",
     `> 更新: ${new Date().toISOString().slice(0, 10)}`,
     "",
     "---",
     "",
+    "## 1. 玩法机制总览",
+    "",
+    "<!-- AI填充：这个游戏怎么玩？核心循环是什么？一句话玩法定义 + 核心循环图。 -->",
+    "",
+    "```mermaid",
+    "flowchart LR",
+    "  A[生成砖块] --> B[玩家移动/旋转]",
+    "  B --> C[下落]",
+    "  C --> D{能否继续下落?}",
+    "  D -->|能| C",
+    "  D -->|落定| E[消行判定]",
+    "  E --> F[计分/难度推进]",
+    "  F --> A",
+    "  E --> G{触顶?}",
+    "  G -->|是| H[游戏结束]",
+    "```",
+    "> 上图为骨架，AI 需按实际核心类调用链校正。",
+    "",
+    "---",
+    "",
+    "## 2. 详细逻辑流程",
+    "",
+    "<!-- AI填充：按核心玩法闭环逐环节展开。每个环节包含：",
+    "  - 触发条件与控制流（对应 IDA 方法 + 代码行号）",
+    "  - 精确数值表（速度/延迟/门槛等，标注 A1 解码来源）",
+    "  - Mermaid 时序图或状态图",
+    "-->",
+    "",
+    "### 2.1 砖块生成",
+    "<!-- AI填充：形状数据(BRICK_POS精确值)、生成位置、随机规则 -->",
+    "",
+    "### 2.2 移动与旋转",
+    "<!-- AI填充：左右移动的首延迟/重复延迟(MOVE_DELAY精确值)、旋转轴心(CENTER_POINTS) -->",
+    "",
+    "### 2.3 下落与落定",
+    "<!-- AI填充：下落速度曲线、dwell 落定判定、sentinel字段语义+证据 -->",
+    "",
+    "### 2.4 消行与计分",
+    "<!-- AI填充：满行检测、连锁下落、计分公式(精确系数) -->",
+    "",
+    "### 2.5 难度与解锁",
+    "<!-- AI填充：难度曲线(CalculateSpeed精确值)、星级门槛(UNLOCK_STARS精确值) -->",
+    "",
+    "---",
+    "",
+    "## 3. 逻辑 ↔ 表现对应表",
+    "",
+    "<!-- AI填充：每个逻辑事件对应的屏幕表现（动画/音效/UI/位移），可附截图位 -->",
+    "",
+    "| 逻辑事件 | 触发方法 (代码行) | 屏幕表现 | 音效 | 截图 |",
+    "|---------|------------------|---------|------|------|",
+    "| 砖块落定 | `Brick.cs:???` | 高亮闪烁 0.2s 后恢复 | BrickStop | _待补_ |",
+    "| ... | ... | ... | ... | ... |",
+    "",
+    "---",
+    "",
+    "## 附录：已实现核心类索引",
+    "",
+    "| 类名 | 方法数 | 字段数 | 基类 | 代码文件 |",
+    "|------|--------|--------|------|---------|",
   ]
 
-  for (const g of groups) {
-    if (!g.classes.length) continue
-    lines.push(`## ${g.name}（${g.classes.length} 个类）`, "")
-
-    // 时序图
-    const names = g.classes.slice(0, 5).map(c => c.metadata.className)
-    lines.push("### 交互时序图", "", "```mermaid", "sequenceDiagram")
-    for (const n of names) lines.push(`  participant ${n}`)
-    for (const c of g.classes.slice(0, 5))
-      for (const dep of (c.metadata.dependencies ?? []))
-        if (names.includes(dep)) {
-          lines.push(`  ${c.metadata.className}->>+${dep}: 调用`)
-          lines.push(`  ${dep}-->>-${c.metadata.className}: 返回`)
-        }
-    lines.push("```", "")
-
-    // 类清单
-    lines.push("### 类清单", "", "| 类名 | 字段 | 方法 | 复杂度 | 已验证 | 基类 |", "|------|------|------|--------|--------|------|")
-    for (const c of g.classes) {
-      const base = cleanIdentifier(c.metadata.baseClass) ?? "-"
-      const isV = verifiedMap.has(c.metadata.className) ? "✅" : "⬜"
-      lines.push(`| \`${c.metadata.className}\` | ${c.metadata.fieldCount ?? "-"} | ${c.metadata.methodCount ?? "-"} | ${c.metadata.complexity ?? "-"} | ${isV} | ${base} |`)
-    }
-    lines.push("")
-
-    // 状态机：从类名推断（类名含 State/Phase/Stage/Status 词才生成）
-    const stateClasses = g.classes.filter(c => /State|Phase|Stage|Status/i.test(c.metadata.className ?? ""))
-    if (stateClasses.length > 0) {
-      lines.push("### 状态机推断", "")
-      lines.push("```mermaid", "stateDiagram-v2")
-      lines.push("  [*] --> Idle", "  Idle --> Active : 开始", "  Active --> Paused : 暂停", "  Paused --> Active : 恢复", "  Active --> [*] : 结束")
-      lines.push("```", "", `> 注：基于类名关键词推断（${stateClasses.map(c => c.metadata.className).join(", ")}），需人工验证`, "")
-    }
-
-    // 已验证摘要
-    const vi = g.classes.filter(c => verifiedMap.has(c.metadata.className))
-    if (vi.length) {
-      lines.push("### 已验证实现摘要", "")
-      for (const c of vi) {
-        const code = (verifiedMap.get(c.metadata.className) as any).content as string
-        lines.push(`#### \`${c.metadata.className}\``, "", "```csharp", code.slice(0, 500), "// ...", "```", "")
-      }
-    }
-
-    lines.push("---", "")
+  for (const c of verified.sort((a, b) => (b.metadata.methodCount ?? 0) - (a.metadata.methodCount ?? 0))) {
+    const base = cleanIdentifier(c.metadata.baseClass) ?? "-"
+    lines.push(
+      `| \`${c.metadata.className}\` | ${c.metadata.methodCount ?? "-"} | ${c.metadata.fieldCount ?? "-"} | ${base} | \`Generated/${c.metadata.className}.cs\` |`,
+    )
   }
+
+  if (verified.length === 0) {
+    lines.push("| _（尚无已验证实现，阶段 B 生成后填充）_ | | | | |")
+  }
+
+  lines.push("", "---", "", "> 注：本文档骨架由 unity-rag-analyzer 生成，`<!-- AI填充 -->` 标记处由分析流程")
+  lines.push("> 基于 IDA 伪代码 + A1 精确数值 + 已验证代码深度撰写，确保逻辑与数值 100% 精确。")
 
   return lines.join("\n")
 }

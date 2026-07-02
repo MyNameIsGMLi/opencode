@@ -65,18 +65,19 @@ export async function loadProjectConfig(projectDir: string): Promise<UnityProjec
 }
 
 // 解析 dump.cs 的完整路径（支持直接路径覆盖）
+// path.resolve 正确处理 dumpDir 为绝对路径的情况（绝对段会丢弃前面的 projectDir）。
 export function resolveDumpCsPath(projectDir: string, config: UnityProjectConfig, override?: string): string {
-  return override ?? path.join(projectDir, config.dumpDir, config.dumpCsName)
+  return override ?? path.resolve(projectDir, config.dumpDir, config.dumpCsName)
 }
 
 // 解析 script.json 的完整路径（支持直接路径覆盖）
 export function resolveScriptJsonPath(projectDir: string, config: UnityProjectConfig, override?: string): string {
-  return override ?? path.join(projectDir, config.dumpDir, config.scriptJsonName)
+  return override ?? path.resolve(projectDir, config.dumpDir, config.scriptJsonName)
 }
 
 // 解析代码输出目录
 export function resolveScriptsDir(projectDir: string, config: UnityProjectConfig, override?: string): string {
-  return override ?? path.join(projectDir, config.scriptsDir)
+  return override ?? path.resolve(projectDir, config.scriptsDir)
 }
 
 // 解析分析文档目录

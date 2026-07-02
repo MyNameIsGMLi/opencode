@@ -47,7 +47,10 @@ export default tool({
 
     let result: any = {}
 
-    switch (ext) {
+    // .zip 容器（如 APKPure 下发的 *.xapk.zip）：探测内部是否为多 APK 分包，是则按 XAPK 处理
+    const effectiveExt = ext === ".zip" ? await detectZipKind(inputPath, ctx) : ext
+
+    switch (effectiveExt) {
       case ".apk":
         result = await unpackAPK(inputPath, outputDir, ctx)
         break
@@ -62,7 +65,7 @@ export default tool({
 
       default:
         return {
-          output: `Error: Unsupported file format '${ext}'. Supported: .apk, .ipa, .xapk`,
+          output: `Error: Unsupported file format '${ext}'. Supported: .apk, .ipa, .xapk, .zip(XAPK container)`,
           metadata: { success: false, error: "Unsupported format" },
         }
     }
@@ -99,16 +102,33 @@ async function unpackAPK(inputPath: string, outputDir: string, ctx: any) {
   const hasMetadata = await fileExists(metadataPath)
   const hasAssets = await fileExists(assetsPath)
 
+  // 零降级：缺 IL2CPP 二进制或 metadata 即 BLOCKED
+  if (!il2cppPath || !hasMetadata) {
+    const missing = [!il2cppPath && "libil2cpp.so", !hasMetadata && "global-metadata.dat"]
+      .filter(Boolean)
+      .join(", ")
+    return {
+      output: `[BLOCKED] APK 解包后关键文件缺失：${missing}
+IL2CPP: ${il2cppPath || "NOT FOUND"}
+Metadata: ${hasMetadata ? metadataPath : "NOT FOUND"}
+需人工确认：该 APK 是否为 IL2CPP 打包的 Unity 游戏，或是否为分包（应提供 XAPK）。`,
+      metadata: {
+        success: false,
+        blocked: true,
+        type: "apk",
+        reason: `解包后缺失关键文件: ${missing}`,
+        outputDir,
+      },
+    }
+  }
+
   return {
     output: `APK extracted successfully to ${outputDir}
     
 Files found:
-- IL2CPP Binary: ${il2cppPath || "NOT FOUND"}
-- Metadata: ${hasMetadata ? metadataPath : "NOT FOUND"}
-- Assets: ${hasAssets ? assetsPath : "NOT FOUND"}
-
-${!il2cppPath ? "\n⚠️ Warning: No IL2CPP binary found. This may not be a Unity IL2CPP game." : ""}
-${!hasMetadata ? "\n⚠️ Warning: global-metadata.dat not found." : ""}`,
+- IL2CPP Binary: ${il2cppPath}
+- Metadata: ${metadataPath}
+- Assets: ${hasAssets ? assetsPath : "NOT FOUND"}`,
 
     metadata: {
       success: true,
@@ -198,20 +218,40 @@ async function unpackXAPK(inputPath: string, outputDir: string, ctx: any) {
   const hasMetadata = await fileExists(metadataPath)
   const hasAssets = await fileExists(assetsPath)
 
+  // 零降级：分包合并后 IL2CPP 二进制或 metadata 缺失即 BLOCKED，不得带缺失文件推进
+  if (!il2cppPath || !hasMetadata) {
+    const missing = [!il2cppPath && "libil2cpp.so", !hasMetadata && "global-metadata.dat"]
+      .filter(Boolean)
+      .join(", ")
+    return {
+      output: `[BLOCKED] XAPK 分包合并后关键文件缺失：${missing}
+合并的 APK：main=${mainApk}，config=${configApks.join(", ") || "无"}
+IL2CPP: ${il2cppPath || "NOT FOUND"}
+Metadata: ${hasMetadata ? metadataPath : "NOT FOUND"}
+需人工确认：是否所有分包 APK 都已下载完整，或该游戏是否为 IL2CPP 打包。`,
+      metadata: {
+        success: false,
+        blocked: true,
+        type: "xapk",
+        reason: `分包合并后缺失关键文件: ${missing}`,
+        mergedApks: { main: mainApk, configs: configApks },
+        outputDir,
+      },
+    }
+  }
+
   return {
     output: `XAPK extracted successfully to ${outputDir}
 
 Main APK: ${mainApk}
+Config APKs merged: ${configApks.join(", ") || "none"}
 OBB files: ${obbFiles.length} found
 
 Files found:
-- IL2CPP Binary: ${il2cppPath || "NOT FOUND"}
-- Metadata: ${hasMetadata ? metadataPath : "NOT FOUND"}
+- IL2CPP Binary: ${il2cppPath}
+- Metadata: ${metadataPath}
 - Assets: ${hasAssets ? assetsPath : "NOT FOUND"}
-- OBB Data: ${obbFiles.length > 0 ? path.join(outputDir, "obb") : "None"}
-
-${!il2cppPath ? "\n⚠️ Warning: No IL2CPP binary found." : ""}
-${!hasMetadata ? "\n⚠️ Warning: global-metadata.dat not found." : ""}`,
+- OBB Data: ${obbFiles.length > 0 ? path.join(outputDir, "obb") : "None"}`,
 
     metadata: {
       success: true,
@@ -327,4 +367,14 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// 探测 .zip 容器真实类型：内部含 .apk 视为 XAPK 容器；含 Payload/ 视为 IPA；否则当作裸 APK 容器
+async function detectZipKind(inputPath: string, ctx: any): Promise<string> {
+  const listing = await runCommand(ctx, `unzip -l "${inputPath}" 2>&1 || true`)
+  const hasApk = /\s\S+\.apk(\r?\n|$)/i.test(listing) || /\.apk\b/i.test(listing)
+  const hasPayload = /\bPayload\//i.test(listing)
+  if (hasApk) return ".xapk"
+  if (hasPayload) return ".ipa"
+  return ".apk"
 }
