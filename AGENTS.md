@@ -34,7 +34,9 @@ This checklist is NOT a passive reference. It MUST be executed explicitly before
 
 If you skip this table, you are violating this rule. There are no exceptions — not for simple changes, not under time pressure, not when typecheck passes.
 
-- To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
+- To regenerate the legacy JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
+- After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
+- Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk-next` composes Client, Core, and Server.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 
